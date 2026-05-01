@@ -264,7 +264,7 @@ META_TERSIER    = "meta_tersier.pkl"
 INDEX_KUARTIER  = "faiss_kuartier.index"
 INDEX_TERSIER   = "faiss_tersier.index"
 
-EMBEDDING_MODEL = "models/text-embedding-002"
+EMBEDDING_MODEL = "text-embedding-004"
 GEMINI_MODEL    = "gemini-2.5-flash"
 EMBED_DIM       = 768
 CONFIDENCE_THR  = 0.72   # skor cosine similarity ambang batas
