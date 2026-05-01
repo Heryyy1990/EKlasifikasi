@@ -1,8 +1,7 @@
 streamlit
 pandas
 numpy
-faiss-cpu==1.7.4
+scikit-learn
 sentence-transformers
 torch
 google-genai
-scikit-learn
