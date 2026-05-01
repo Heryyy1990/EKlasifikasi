@@ -1,24 +1,16 @@
-# app.py
-# ==================================================
-# SIKAP FINAL v3
-# Google GenAI NEW SDK + Gemini 2.5 Flash
-# FAISS + Metadata Filter + Cross Encoder Rerank
-# ==================================================
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-import faiss
 import pickle
 import json
-import re
 
+from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from google import genai
 
-# ==================================================
-# 1. PAGE CONFIG
-# ==================================================
+# =====================================================
+# CONFIG
+# =====================================================
 st.set_page_config(
     page_title="SIKAP",
     page_icon="📁",
@@ -28,34 +20,26 @@ st.set_page_config(
 st.title("📁 SIKAP")
 st.caption("Sistem Identifikasi Klasifikasi Arsip Pintar")
 
-# ==================================================
-# 2. LOAD API KEY
-# Streamlit Secrets:
-# GOOGLE_API_KEY="xxxxx"
-# ==================================================
+# =====================================================
+# API KEY
+# =====================================================
 client = genai.Client(
     api_key=st.secrets["GOOGLE_API_KEY"]
 )
 
-# ==================================================
-# 3. LOAD ALL FILES
-# ==================================================
+# =====================================================
+# LOAD FILES
+# =====================================================
 @st.cache_resource
 def load_all():
 
-    # embedding model
     embed_model = SentenceTransformer(
         "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     )
 
-    # reranker
     reranker = CrossEncoder(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
     )
-
-    # faiss
-    index_q = faiss.read_index("faiss_kuartier.index")
-    index_t = faiss.read_index("faiss_tersier.index")
 
     # metadata
     with open("meta_kuartier.pkl", "rb") as f:
@@ -64,17 +48,28 @@ def load_all():
     with open("meta_tersier.pkl", "rb") as f:
         meta_t = pickle.load(f)
 
-    # csv master
+    # csv
     df = pd.read_csv("klasifikasi_sikap_final_v2.csv")
 
-    return embed_model, reranker, index_q, index_t, meta_q, meta_t, df
+    # precompute embeddings
+    emb_q = embed_model.encode(
+        [x["embedding_text"] for x in meta_q],
+        convert_to_numpy=True
+    )
+
+    emb_t = embed_model.encode(
+        [x["embedding_text"] for x in meta_t],
+        convert_to_numpy=True
+    )
+
+    return embed_model, reranker, meta_q, meta_t, emb_q, emb_t, df
 
 
-embed_model, reranker, index_q, index_t, meta_q, meta_t, df = load_all()
+embed_model, reranker, meta_q, meta_t, emb_q, emb_t, df = load_all()
 
-# ==================================================
-# 4. BUILD PRIMER & SEKUNDER MAP
-# ==================================================
+# =====================================================
+# BUILD MAP
+# =====================================================
 primer_map = {}
 sekunder_map = {}
 
@@ -83,37 +78,33 @@ for _, row in df.iterrows():
     kode = str(row["kode"])
     uraian = str(row["uraian"])
 
-    # primer
     if "." not in kode:
         primer_map[kode] = uraian
 
-    # sekunder
     if kode.count(".") == 1:
         sekunder_map[kode] = uraian
 
-# ==================================================
-# 5. GEMINI ROUTER
-# ==================================================
-def route_query(user_text):
+# =====================================================
+# GEMINI ROUTER
+# =====================================================
+def route_query(text):
 
     prompt = f"""
-    Anda adalah analis klasifikasi arsip pemerintah.
-
-    Analisis isi surat berikut.
+    Analisis surat berikut.
 
     Tentukan:
     1. domain utama
-    2. kata kunci penting
-    3. kemungkinan kode primer (contoh: 000,100,500,900)
+    2. kata kunci
+    3. kemungkinan kode primer
 
     Surat:
-    {user_text}
+    {text}
 
-    Jawab hanya JSON valid:
+    Jawab JSON:
 
     {{
       "domain":"...",
-      "keywords":["...","..."],
+      "keywords":["..."],
       "primer":"..."
     }}
     """
@@ -125,20 +116,12 @@ def route_query(user_text):
 
     return response.text
 
-# ==================================================
-# 6. PARSE JSON GEMINI
-# ==================================================
-def parse_router(raw):
+
+def parse_json(raw):
 
     try:
-        raw = raw.strip()
-
-        raw = raw.replace("```json", "")
-        raw = raw.replace("```", "")
-
-        data = json.loads(raw)
-
-        return data
+        raw = raw.replace("```json", "").replace("```", "")
+        return json.loads(raw)
 
     except:
         return {
@@ -147,165 +130,133 @@ def parse_router(raw):
             "primer": "000"
         }
 
-# ==================================================
-# 7. SEARCH FAISS
-# ==================================================
-def search_faiss(query, index, topk=20):
+# =====================================================
+# SEARCH ENGINE
+# =====================================================
+def semantic_search(query, emb_matrix, meta, topk=20):
 
-    vec = embed_model.encode(
-        [query],
-        convert_to_numpy=True
-    )
+    q = embed_model.encode([query], convert_to_numpy=True)
 
-    faiss.normalize_L2(vec)
+    scores = cosine_similarity(q, emb_matrix)[0]
 
-    D, I = index.search(vec, topk)
+    idx = np.argsort(scores)[::-1][:topk]
 
-    return D[0], I[0]
+    results = []
 
-# ==================================================
-# 8. FILTER BY PRIMER
-# ==================================================
-def filter_candidates(indices, meta, primer):
+    for i in idx:
+        row = meta[i].copy()
+        row["sim_score"] = float(scores[i])
+        results.append(row)
 
-    hasil = []
+    return results
 
-    for idx in indices:
+# =====================================================
+# FILTER PRIMER
+# =====================================================
+def filter_primer(rows, primer):
 
-        row = meta[idx]
-        kode = str(row["kode"])
+    return [
+        r for r in rows
+        if str(r["kode"]).startswith(primer)
+    ]
 
-        if kode.startswith(primer):
-            hasil.append(row)
+# =====================================================
+# RERANK
+# =====================================================
+def rerank(query, rows):
 
-    return hasil
-
-# ==================================================
-# 9. RERANK
-# ==================================================
-def rerank(query, candidates):
-
-    if len(candidates) == 0:
+    if len(rows) == 0:
         return []
 
-    pairs = []
-
-    for c in candidates:
-        pairs.append(
-            [query, c["embedding_text"]]
-        )
+    pairs = [
+        [query, r["embedding_text"]]
+        for r in rows
+    ]
 
     scores = reranker.predict(pairs)
 
-    for i in range(len(candidates)):
-        candidates[i]["score"] = float(scores[i])
+    for i in range(len(rows)):
+        rows[i]["score"] = float(scores[i])
 
-    candidates = sorted(
-        candidates,
+    rows = sorted(
+        rows,
         key=lambda x: x["score"],
         reverse=True
     )
 
-    return candidates[:3]
+    return rows[:3]
 
-# ==================================================
-# 10. FALLBACK SEARCH TERSIER
-# ==================================================
-def fallback_tersier(query):
-
-    D, I = search_faiss(query, index_t, topk=10)
-
-    cands = []
-
-    for idx in I:
-        cands.append(meta_t[idx])
-
-    final = rerank(query, cands)
-
-    return final
-
-# ==================================================
-# 11. UI INPUT
-# ==================================================
+# =====================================================
+# UI
+# =====================================================
 user_text = st.text_area(
     "Masukkan uraian surat / perihal surat",
     height=180
 )
 
-# ==================================================
-# 12. BUTTON PROCESS
-# ==================================================
 if st.button("Cari Klasifikasi"):
 
     if user_text.strip() == "":
-        st.warning("Silakan isi uraian surat terlebih dahulu.")
+        st.warning("Silakan isi uraian surat.")
         st.stop()
 
-    # ----------------------------------------------
-    # A. Gemini Router
-    # ----------------------------------------------
-    with st.spinner("Gemini menganalisis isi surat..."):
+    # -----------------------------------------
+    # Gemini Routing
+    # -----------------------------------------
+    with st.spinner("Gemini menganalisis surat..."):
 
         raw = route_query(user_text)
-        info = parse_router(raw)
+        info = parse_json(raw)
 
     primer = str(info["primer"])
 
-    st.subheader("🧠 Hasil Analisis Gemini")
+    st.subheader("🧠 Hasil Analisis")
 
-    st.write("Domain :", info["domain"])
-    st.write("Primer :", primer, "-", primer_map.get(primer, ""))
-    st.write("Keywords :", ", ".join(info["keywords"]))
+    st.write("Domain:", info["domain"])
+    st.write("Primer:", primer, "-", primer_map.get(primer, ""))
+    st.write("Keywords:", ", ".join(info["keywords"]))
 
-    # ----------------------------------------------
-    # B. Search Kuartier
-    # ----------------------------------------------
-    with st.spinner("Mencari kandidat kuartier..."):
+    # -----------------------------------------
+    # Search Kuartier
+    # -----------------------------------------
+    with st.spinner("Mencari kuartier..."):
 
-        D, I = search_faiss(user_text, index_q, topk=20)
-
-        candidates = filter_candidates(
-            I, meta_q, primer
+        rows = semantic_search(
+            user_text,
+            emb_q,
+            meta_q,
+            topk=20
         )
 
-        final = rerank(user_text, candidates)
+        rows = filter_primer(rows, primer)
 
-    # ----------------------------------------------
-    # C. Confidence Check
-    # ----------------------------------------------
-    use_fallback = False
+        final = rerank(user_text, rows)
 
-    if len(final) == 0:
-        use_fallback = True
+    # fallback
+    if len(final) == 0 or final[0]["score"] < 0.45:
 
-    elif final[0]["score"] < 0.45:
-        use_fallback = True
+        st.info("Fallback ke level tersier...")
 
-    # ----------------------------------------------
-    # D. Fallback Tersier
-    # ----------------------------------------------
-    if use_fallback:
-
-        st.info(
-            "Confidence kuartier rendah. "
-            "Menggunakan fallback tersier..."
+        rows = semantic_search(
+            user_text,
+            emb_t,
+            meta_t,
+            topk=10
         )
 
-        final = fallback_tersier(user_text)
+        final = rerank(user_text, rows)
 
-    # ----------------------------------------------
-    # E. Output
-    # ----------------------------------------------
+    # -----------------------------------------
+    # OUTPUT
+    # -----------------------------------------
     st.subheader("🎯 Top 3 Rekomendasi")
 
     for i, row in enumerate(final, start=1):
 
-        st.markdown(
-            f"""
+        st.markdown(f"""
 ### {i}. {row['kode']}
 
 **Uraian:** {row['uraian']}  
 **Level:** {row['level']}  
 **Score:** {round(row['score'],4)}
-"""
-        )
+""")
