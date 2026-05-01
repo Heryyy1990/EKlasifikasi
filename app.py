@@ -265,7 +265,7 @@ INDEX_KUARTIER  = "faiss_kuartier.index"
 INDEX_TERSIER   = "faiss_tersier.index"
 
 EMBEDDING_MODEL = "text-embedding-004"
-GEMINI_MODEL    = "gemini-2.5-flash"
+GEMINI_MODEL    = "gemini-2.0-flash"
 EMBED_DIM       = 768
 CONFIDENCE_THR  = 0.72   # skor cosine similarity ambang batas
 
