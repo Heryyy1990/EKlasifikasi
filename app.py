@@ -269,6 +269,10 @@ GEMINI_MODEL    = "gemini-2.0-flash-exp"
 EMBED_DIM       = 768
 CONFIDENCE_THR  = 0.72   # skor cosine similarity ambang batas
 
+# Jalankan ini sekali untuk mengecek list model
+for m in client.models.list():
+    print(m.name)
+
 # ─────────────────────────────────────────────
 # HELPERS – file existence check
 # ─────────────────────────────────────────────
