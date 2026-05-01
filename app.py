@@ -603,6 +603,12 @@ def main():
         df, meta_kuartier, meta_tersier, idx_kuartier, idx_tersier = load_resources()
 
     client = get_genai_client()
+    # Tambahkan ini sementara untuk cek list model di console
+try:
+    for m in client.models.list():
+        print(f"Model tersedia: {m.name}")
+except Exception as e:
+    print(f"Gagal list model: {e}")
     if client is None:
         st.error(
             "🔑 **GOOGLE_API_KEY** belum dikonfigurasi.\n\n"
@@ -610,6 +616,7 @@ def main():
             "```\nGOOGLE_API_KEY = \"AIza...\"\n```"
         )
         st.stop()
+        
 
     # ── Input ──
     st.markdown('<div class="input-card">', unsafe_allow_html=True)
