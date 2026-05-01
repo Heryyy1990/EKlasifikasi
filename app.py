@@ -324,6 +324,74 @@ def get_embedding(client, text: str) -> np.ndarray:
 # ─────────────────────────────────────────────
 # GEMINI – EXTRACT INTENT & PRIMER/SEKUNDER
 # ─────────────────────────────────────────────
+def _safe_parse_json(raw: str) -> dict:
+    """
+    Coba berbagai cara parse JSON dari output Gemini yang tidak selalu rapi.
+    Urutan upaya:
+      1. Parse langsung
+      2. Strip markdown fences (```json … ```)
+      3. Cari blok { … } pertama dengan regex
+      4. Regex per-field sebagai last resort
+    """
+    text = raw.strip()
+
+    # ── Upaya 1: langsung ──
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # ── Upaya 2: hapus markdown fences ──
+    cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # ── Upaya 3: ambil blok JSON pertama { … } ──
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # ── Upaya 4: regex per-field (fallback kasar) ──
+    def _extract(pattern, default=""):
+        m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        return m.group(1).strip().strip('"').strip("'") if m else default
+
+    intent_summary = _extract(r'"intent_summary"\s*:\s*"([^"]*)"')
+    kode_primer    = _extract(r'"kode_primer"\s*:\s*"([^"]*)"')
+    kode_sekunder  = _extract(r'"kode_sekunder"\s*:\s*"([^"]*)"')
+    domain         = _extract(r'"domain"\s*:\s*"([^"]*)"')
+
+    kw_match = re.search(r'"keywords"\s*:\s*\[([^\]]*)\]', text)
+    if kw_match:
+        keywords = [k.strip().strip('"').strip("'") for k in kw_match.group(1).split(",") if k.strip()]
+    else:
+        keywords = []
+
+    if kode_primer:
+        return {
+            "intent_summary": intent_summary or "Tidak dapat dianalisis.",
+            "kode_primer":    kode_primer,
+            "kode_sekunder":  kode_sekunder,
+            "keywords":       keywords,
+            "domain":         domain or "umum",
+        }
+
+    # ── Upaya 5: benar-benar gagal → kembalikan default aman ──
+    return {
+        "intent_summary": "Analisis otomatis tidak berhasil – menggunakan pencarian penuh.",
+        "kode_primer":    "",
+        "kode_sekunder":  "",
+        "keywords":       [],
+        "domain":         "umum",
+    }
+
+
 def extract_intent(client, user_text: str, df: pd.DataFrame) -> dict:
     """
     Minta Gemini menganalisis input dan menentukan:
@@ -331,7 +399,7 @@ def extract_intent(client, user_text: str, df: pd.DataFrame) -> dict:
     - kode_primer (2–3 digit, mis: 000 / 500 / 900)
     - kode_sekunder (mis: 510 / 921)
     - keywords
-    Kembalikan dict.
+    Kembalikan dict. Tidak akan raise exception.
     """
     # Bangun daftar primer unik sebagai referensi
     primer_list = (
@@ -345,36 +413,44 @@ def extract_intent(client, user_text: str, df: pd.DataFrame) -> dict:
     )
 
     prompt = f"""Kamu adalah ahli klasifikasi arsip pemerintahan Indonesia.
-Tugas kamu: analisis teks surat berikut dan tentukan klasifikasinya.
+Analisis teks surat berikut dan tentukan klasifikasinya.
 
 TEKS SURAT:
 \"\"\"{user_text}\"\"\"
 
-DAFTAR KODE PRIMER YANG TERSEDIA:
+DAFTAR KODE PRIMER:
 {primer_str}
 
-Berikan respons HANYA dalam format JSON berikut (tanpa markdown/backtick):
-{{
-  "intent_summary": "<ringkasan 1-2 kalimat maksud dan konteks surat>",
-  "kode_primer": "<kode primer 2-3 digit>",
-  "kode_sekunder": "<kode sekunder 3 digit, bisa kosong string jika tidak yakin>",
-  "keywords": ["<kata kunci 1>", "<kata kunci 2>", "<kata kunci 3>"],
-  "domain": "<domain administrasi, mis: kepegawaian / keuangan / umum / dll>"
-}}"""
+INSTRUKSI PENTING:
+- Balas HANYA dengan satu objek JSON valid.
+- JANGAN tulis apapun sebelum atau sesudah JSON.
+- JANGAN gunakan markdown, backtick, atau komentar.
+- Gunakan tanda kutip ganda untuk semua string.
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.1,
-            max_output_tokens=512,
-        ),
-    )
-    raw = response.text.strip()
-    # bersihkan fence markdown jika ada
-    raw = re.sub(r"^```[a-z]*\n?", "", raw)
-    raw = re.sub(r"\n?```$", "", raw)
-    return json.loads(raw)
+FORMAT WAJIB:
+{{"intent_summary":"<ringkasan 1-2 kalimat>","kode_primer":"<kode 2-3 digit>","kode_sekunder":"<kode 3 digit atau kosong>","keywords":["<kw1>","<kw2>","<kw3>"],"domain":"<domain>"}}"""
+
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=400,
+            ),
+        )
+        raw = response.text or ""
+    except Exception as e:
+        # Jika API call gagal total, kembalikan default
+        return {
+            "intent_summary": f"API error: {e}",
+            "kode_primer":    "",
+            "kode_sekunder":  "",
+            "keywords":       [],
+            "domain":         "umum",
+        }
+
+    return _safe_parse_json(raw)
 
 # ─────────────────────────────────────────────
 # FILTER CANDIDATES BY PRIMER / SEKUNDER
