@@ -9,7 +9,7 @@ streamlit>=1.35.0,<2.0.0
 
 # Google Generative AI (Gemini + Embedding)
 # Gunakan paket baru "google-genai" (bukan google-generativeai lama)
-google-genai>=1.5.0
+google-genai>=0.3.0
 
 # Vector search – versi CPU-only agar ringan di cloud
 faiss-cpu>=1.8.0
