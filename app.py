@@ -603,7 +603,6 @@ def main():
         df, meta_kuartier, meta_tersier, idx_kuartier, idx_tersier = load_resources()
 
     client = get_genai_client()
-    # Tambahkan ini sementara untuk cek list model di console
 try:
     for m in client.models.list():
         print(f"Model tersedia: {m.name}")
