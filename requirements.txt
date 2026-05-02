@@ -1,24 +1,22 @@
 # ============================================================
 # requirements.txt — SIKAP Dependencies
-# Dioptimasi untuk Streamlit Community Cloud Free Tier
+# Dioptimasi untuk Streamlit Community Cloud Free Tier (800MB RAM)
 # ============================================================
 
 # ── Streamlit ──────────────────────────────────────────────
 streamlit>=1.35.0
 
-# ── Google Gemini API (SDK baru, generativeai sudah deprecated) ────
+# ── Google Gemini API (SDK baru) ───────────────────────────
 google-genai>=1.0.0
 
-# ── Embedding BGE-M3 ───────────────────────────────────────
-# FlagEmbedding untuk model BAAI/bge-m3
-# torch-cpu sudah di-pull otomatis oleh FlagEmbedding
-FlagEmbedding>=1.2.10
+# ── Embedding — RINGAN (118MB, gantikan BGE-M3 yang 1.1GB) ─
+sentence-transformers>=3.0.0
 
-# ── FAISS (CPU only — Streamlit Cloud tidak ada GPU) ───────
+# ── FAISS CPU ──────────────────────────────────────────────
 faiss-cpu>=1.7.4
 
 # ── Numerik ────────────────────────────────────────────────
 numpy>=1.24.0
 
-# ── Opsional: pandas (jika metadata.pkl berformat DataFrame) ─
+# ── Pandas (untuk baca metadata jika format DataFrame) ─────
 pandas>=2.0.0
