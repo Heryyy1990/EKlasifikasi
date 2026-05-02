@@ -173,7 +173,7 @@ def extract_inti_surat(text: str, client: genai.Client) -> str:
     """
     prompt = EXTRACT_INTI_PROMPT.format(text=text.strip())
     response = client.models.generate_content(
-        model="gemini-2.5-flash-preview-04-17",
+        model="gemini-2.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.1,        # deterministic & konsisten
