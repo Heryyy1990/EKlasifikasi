@@ -18,7 +18,18 @@ def load_embedding_model():
     """
     Load BGE-M3 menggunakan FlagEmbedding.
     use_fp16=True → hemat ~50% memori, cocok untuk Streamlit Cloud gratis.
+    HF_TOKEN dibaca dari Streamlit Secrets untuk menghindari rate limit HuggingFace.
     """
+    import os
+    # Set HF_TOKEN jika ada di secrets (hindari rate limit HuggingFace)
+    try:
+        hf_token = st.secrets.get("HF_TOKEN", None)
+        if hf_token:
+            os.environ["HF_TOKEN"] = hf_token
+            os.environ["HUGGINGFACE_HUB_TOKEN"] = hf_token
+    except Exception:
+        pass  # HF_TOKEN opsional, lanjut tanpa token
+
     from FlagEmbedding import BGEM3FlagModel
     model = BGEM3FlagModel(
         "BAAI/bge-m3",
