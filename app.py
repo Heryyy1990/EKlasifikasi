@@ -4,7 +4,8 @@
 # ============================================================
 
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from prompts import EXTRACT_INTI_PROMPT
 from utils import (
@@ -142,36 +143,41 @@ html, body, [class*="css"] {
 # INISIALISASI GEMINI API
 # ─────────────────────────────────────────────
 
-def init_gemini():
-    """Baca API key dari Streamlit Secrets dan inisialisasi Gemini."""
+@st.cache_resource(show_spinner=False)
+def init_gemini() -> genai.Client:
+    """
+    Baca API key dari Streamlit Secrets, buat dan cache Gemini Client.
+    Menggunakan google-genai SDK (bukan google-generativeai yang deprecated).
+    """
     try:
         api_key = st.secrets["GOOGLE_API_KEY"]
     except (KeyError, FileNotFoundError):
         st.error(
             "⚠️ **GOOGLE_API_KEY tidak ditemukan.**\n\n"
-            "Tambahkan di Streamlit Cloud: **Settings → Secrets**\n"
-            "```\nGOOGLE_API_KEY = \"AIza...\"\n```"
+            "Tambahkan di Streamlit Cloud: **Settings -> Secrets**\n"
+            "```toml\nGOOGLE_API_KEY = \"AIza...\"\n```"
         )
         st.stop()
-    genai.configure(api_key=api_key)
+    return genai.Client(api_key=api_key)
 
 
 # ─────────────────────────────────────────────
 # EKSTRAK INTI SURAT VIA GEMINI
 # ─────────────────────────────────────────────
 
-def extract_inti_surat(text: str) -> str:
+def extract_inti_surat(text: str, client: genai.Client) -> str:
     """
     Panggil Gemini Flash untuk mengekstrak inti surat.
     Satu API call per klik Proses.
+    Menggunakan google-genai SDK baru.
     """
-    prompt  = EXTRACT_INTI_PROMPT.format(text=text.strip())
-    model   = genai.GenerativeModel("gemini-2.5-flash-preview-04-17")
-    response = model.generate_content(
-        prompt,
-        generation_config=genai.types.GenerationConfig(
-            temperature=0.1,         # deterministic & konsisten
-            max_output_tokens=30,    # inti surat pendek, hemat quota
+    prompt = EXTRACT_INTI_PROMPT.format(text=text.strip())
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-preview-04-17",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.1,        # deterministic & konsisten
+            max_output_tokens=30,   # inti surat pendek, hemat quota
         ),
     )
     inti = response.text.strip().lower()
@@ -238,8 +244,8 @@ def load_all_resources():
 # ─────────────────────────────────────────────
 
 def main():
-    # Inisialisasi Gemini
-    init_gemini()
+    # Inisialisasi Gemini (cached — load sekali)
+    gemini_client = init_gemini()
 
     # Header
     st.markdown('<div class="main-title">🗂️ SIKAP</div>', unsafe_allow_html=True)
@@ -296,7 +302,7 @@ def main():
         # ── Tahap 1: Ekstrak Inti Surat ──
         with st.spinner("🤖 Mengekstrak inti surat dengan Gemini..."):
             try:
-                inti = extract_inti_surat(user_input)
+                inti = extract_inti_surat(user_input, gemini_client)
             except Exception as e:
                 st.error(f"❌ Gagal memanggil Gemini API: {e}")
                 st.stop()
