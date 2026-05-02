@@ -6,8 +6,8 @@
 # ── Streamlit ──────────────────────────────────────────────
 streamlit>=1.35.0
 
-# ── Google Gemini API ──────────────────────────────────────
-google-generativeai>=0.7.0
+# ── Google Gemini API (SDK baru, generativeai sudah deprecated) ────
+google-genai>=1.0.0
 
 # ── Embedding BGE-M3 ───────────────────────────────────────
 # FlagEmbedding untuk model BAAI/bge-m3
