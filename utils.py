@@ -1,6 +1,7 @@
 # ============================================================
 # utils.py — Core logic SIKAP
-# Berisi: load model, embed, search FAISS, scoring, ranking
+# Model: paraphrase-multilingual-MiniLM-L12-v2 (118MB)
+# Ringan untuk Streamlit Cloud free tier (800MB RAM limit)
 # ============================================================
 
 import os
@@ -10,32 +11,37 @@ import faiss
 import streamlit as st
 
 # ─────────────────────────────────────────────
-# 1. LOAD BGE-M3 MODEL (cached — load sekali)
+# MODEL CONFIG
 # ─────────────────────────────────────────────
 
-@st.cache_resource(show_spinner="⏳ Memuat model embedding BGE-M3...")
+MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+# Kenapa model ini (bukan BGE-M3)?
+#   BGE-M3      : ~1.1 GB RAM → OOM di Streamlit Cloud free tier
+#   MiniLM-L12  : ~118 MB RAM → aman, support 50+ bahasa + Indonesia ✓
+# PENTING: FAISS index HARUS direbuild dulu dengan rebuild_index.py!
+
+
+# ─────────────────────────────────────────────
+# 1. LOAD MODEL EMBEDDING (cached)
+# ─────────────────────────────────────────────
+
+@st.cache_resource(show_spinner="⏳ Memuat model embedding...")
 def load_embedding_model():
     """
-    Load BGE-M3 menggunakan FlagEmbedding.
-    use_fp16=True → hemat ~50% memori, cocok untuk Streamlit Cloud gratis.
-    HF_TOKEN dibaca dari Streamlit Secrets untuk menghindari rate limit HuggingFace.
+    Load sentence-transformers model yang ringan.
+    Di-cache Streamlit → load sekali, reuse terus.
     """
-    import os
-    # Set HF_TOKEN jika ada di secrets (hindari rate limit HuggingFace)
+    # Set HF_TOKEN jika ada di secrets (percepat download HuggingFace)
     try:
         hf_token = st.secrets.get("HF_TOKEN", None)
         if hf_token:
-            os.environ["HF_TOKEN"] = hf_token
+            os.environ["HF_TOKEN"]              = hf_token
             os.environ["HUGGINGFACE_HUB_TOKEN"] = hf_token
     except Exception:
-        pass  # HF_TOKEN opsional, lanjut tanpa token
+        pass  # HF_TOKEN opsional
 
-    from FlagEmbedding import BGEM3FlagModel
-    model = BGEM3FlagModel(
-        "BAAI/bge-m3",
-        use_fp16=True,        # hemat memori
-        device="cpu",         # Streamlit Cloud tidak punya GPU
-    )
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer(MODEL_NAME, device="cpu")
     return model
 
 
@@ -47,12 +53,11 @@ def load_embedding_model():
 def load_faiss_index(index_path: str = "sikap_bge.index"):
     """
     Load FAISS index dari file .index.
-    File ini berisi seluruh embedding dataset.
     """
     if not os.path.exists(index_path):
         raise FileNotFoundError(
             f"File '{index_path}' tidak ditemukan. "
-            "Pastikan file ada di root folder project."
+            "Pastikan file ada di root folder project dan sudah di-push ke GitHub."
         )
     index = faiss.read_index(index_path)
     return index
@@ -65,24 +70,20 @@ def load_faiss_index(index_path: str = "sikap_bge.index"):
 @st.cache_resource(show_spinner="⏳ Memuat metadata klasifikasi...")
 def load_metadata(meta_path: str = "metadata.pkl"):
     """
-    Load metadata.pkl yang berisi mapping index → data klasifikasi.
-    Ekspektasi struktur: list of dict dengan key:
-    kode, uraian, penjelasan, konteks, domain, activity, embedding_text
+    Load metadata.pkl — mapping index FAISS ke data klasifikasi.
     """
     if not os.path.exists(meta_path):
         raise FileNotFoundError(
             f"File '{meta_path}' tidak ditemukan. "
-            "Pastikan file ada di root folder project."
+            "Pastikan file ada di root folder project dan sudah di-push ke GitHub."
         )
     with open(meta_path, "rb") as f:
         metadata = pickle.load(f)
 
-    # Normalkan ke list of dict jika berbentuk lain
+    # Normalkan ke list of dict
     if hasattr(metadata, "to_dict"):
-        # Jika pandas DataFrame
         metadata = metadata.to_dict(orient="records")
     elif isinstance(metadata, dict):
-        # Jika dict of lists (format DataFrame)
         keys = list(metadata.keys())
         n = len(metadata[keys[0]])
         metadata = [{k: metadata[k][i] for k in keys} for i in range(n)]
@@ -96,21 +97,16 @@ def load_metadata(meta_path: str = "metadata.pkl"):
 
 def embed_query(model, text: str) -> np.ndarray:
     """
-    Ubah teks query menjadi vector embedding menggunakan BGE-M3.
+    Ubah teks query menjadi vector embedding.
+    normalize_embeddings=True agar cocok dengan inner product similarity.
     Return: numpy array shape (1, dim), dtype float32
     """
-    output = model.encode(
+    vec = model.encode(
         [text],
-        batch_size=1,
-        max_length=512,
-        return_dense=True,
-        return_sparse=False,
-        return_colbert_vecs=False,
-    )
-    vec = np.array(output["dense_vecs"], dtype=np.float32)
-    # Normalisasi L2 agar cocok dengan inner product similarity
-    faiss.normalize_L2(vec)
-    return vec
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    ).astype(np.float32)
+    return vec  # shape: (1, dim)
 
 
 # ─────────────────────────────────────────────
@@ -125,30 +121,28 @@ def search_candidates(
 ) -> list:
     """
     Cari top_k kandidat paling mirip dari FAISS index.
-    Return: list of dict kandidat dengan field asli + similarity_score
+    Return: list of dict kandidat + similarity_score
     """
-    # FAISS search
     scores, indices = index.search(query_vec, top_k)
-    scores = scores[0]    # (top_k,)
-    indices = indices[0]  # (top_k,)
+    scores  = scores[0]
+    indices = indices[0]
 
     candidates = []
     for rank, (idx, raw_score) in enumerate(zip(indices, scores)):
         if idx < 0 or idx >= len(metadata):
-            continue  # skip invalid index
+            continue
 
-        row = dict(metadata[idx])  # copy agar aman
+        row = dict(metadata[idx])
 
-        # Konversi score ke rentang 0–1
-        # Jika index pakai inner product (cosine), score sudah 0–1
-        # Jika index pakai L2 distance, konversi: sim = 1 / (1 + dist)
+        # Inner product dengan normalized vectors = cosine similarity (0–1)
+        # L2 distance: konversi ke similarity
         if index.metric_type == faiss.METRIC_INNER_PRODUCT:
             sim = float(np.clip(raw_score, 0.0, 1.0))
         else:
             sim = float(1.0 / (1.0 + max(raw_score, 0.0)))
 
         row["_similarity"] = sim
-        row["_rank"] = rank
+        row["_rank"]       = rank
         candidates.append(row)
 
     return candidates
@@ -160,17 +154,15 @@ def search_candidates(
 
 def get_kode_level(kode: str) -> int:
     """
-    Tentukan level hierarki berdasarkan jumlah segmen kode.
-    Contoh:
-      "500"         → level 1 (primer)
-      "500.2"       → level 2 (sekunder)
-      "500.2.1"     → level 3 (tersier)
-      "500.2.1.4"   → level 4 (kuartier)
+    Hitung level hierarki kode.
+    "500"       → 1 (primer)
+    "500.2"     → 2 (sekunder)
+    "500.2.1"   → 3 (tersier)
+    "500.2.1.4" → 4 (kuartier)
     """
     if not kode or not isinstance(kode, str):
         return 0
-    parts = str(kode).strip().split(".")
-    return len(parts)
+    return len(str(kode).strip().split("."))
 
 
 # ─────────────────────────────────────────────
@@ -179,38 +171,32 @@ def get_kode_level(kode: str) -> int:
 
 def score_candidates(candidates: list) -> list:
     """
-    Hitung FINAL_SCORE untuk setiap kandidat.
-
-    Formula:
     FINAL_SCORE = (embedding_similarity × 0.70)
-                + (domain_match × 0.20)
-                + (activity_match × 0.10)
+                + (domain_match         × 0.20)
+                + (activity_match       × 0.10)
 
-    domain_match dan activity_match ditentukan berdasarkan
-    konsensus domain/activity dari top-5 kandidat teratas
-    (mayoritas voting sederhana).
+    domain_match & activity_match ditentukan dari mayoritas top-5.
     """
     if not candidates:
         return []
 
-    # Tentukan domain & activity dominan dari top-5
-    top5 = candidates[:5]
+    from collections import Counter
 
     def dominant(field: str) -> str:
-        values = [str(c.get(field, "")).strip().lower() for c in top5 if c.get(field)]
-        if not values:
-            return ""
-        from collections import Counter
-        return Counter(values).most_common(1)[0][0]
+        vals = [
+            str(c.get(field, "")).strip().lower()
+            for c in candidates[:5] if c.get(field)
+        ]
+        return Counter(vals).most_common(1)[0][0] if vals else ""
 
     dom_dominant = dominant("domain")
     act_dominant = dominant("activity")
 
     scored = []
     for c in candidates:
-        sim   = c.get("_similarity", 0.0)
-        dom   = str(c.get("domain",   "")).strip().lower()
-        act   = str(c.get("activity", "")).strip().lower()
+        sim = c.get("_similarity", 0.0)
+        dom = str(c.get("domain",   "")).strip().lower()
+        act = str(c.get("activity", "")).strip().lower()
 
         domain_match   = 1.0 if (dom and dom == dom_dominant) else 0.0
         activity_match = 1.0 if (act and act == act_dominant) else 0.0
@@ -223,7 +209,6 @@ def score_candidates(candidates: list) -> list:
         row["_final_score"]    = round(final_score, 4)
         scored.append(row)
 
-    # Urutkan dari skor tertinggi
     scored.sort(key=lambda x: x["_final_score"], reverse=True)
     return scored
 
@@ -232,27 +217,24 @@ def score_candidates(candidates: list) -> list:
 # 8. HIERARCHICAL FILTERING & RANKING
 # ─────────────────────────────────────────────
 
-SIMILARITY_THRESHOLD_QUARTIER = 0.45   # min similarity untuk kuartier diterima
-SIMILARITY_THRESHOLD_TERTIER  = 0.30   # min similarity untuk tersier diterima
+SIMILARITY_THRESHOLD_QUARTIER = 0.40
+SIMILARITY_THRESHOLD_TERTIER  = 0.25
 
 def get_recommendations(scored_candidates: list, top_n: int = 3) -> list:
     """
-    Pilih rekomendasi terbaik dengan strategi hierarchical:
-    1. Utamakan kuartier (level 4) dengan similarity ≥ threshold
-    2. Jika kurang, lengkapi dengan tersier (level 3)
-    3. Hindari kode duplikat / kode induk yang sudah ada
-
-    Return: list of dict hasil rekomendasi, maks top_n item.
+    Pilih rekomendasi:
+    1. Prioritas kuartier (level 4) dengan similarity ≥ threshold
+    2. Fallback tersier (level 3) jika kuartier kurang
+    3. Best-effort jika masih kurang
     """
-    quartier  = []   # level 4
-    tertier   = []   # level 3
+    quartier  = []
+    tertier   = []
     seen_kode = set()
 
     for c in scored_candidates:
         kode  = str(c.get("kode", "")).strip()
         level = get_kode_level(kode)
         sim   = c.get("_similarity", 0.0)
-        score = c.get("_final_score", 0.0)
 
         if kode in seen_kode:
             continue
@@ -264,25 +246,20 @@ def get_recommendations(scored_candidates: list, top_n: int = 3) -> list:
             tertier.append(c)
             seen_kode.add(kode)
 
-    # Gabung: kuartier dulu, baru tersier jika kurang
     result = quartier[:top_n]
+
     if len(result) < top_n:
         needed = top_n - len(result)
-        # Filter tersier yang bukan parent dari kuartier yang sudah masuk
         existing_parents = {".".join(k["kode"].split(".")[:3]) for k in result}
-        extra_tertier = [
-            t for t in tertier
-            if t["kode"] not in existing_parents
-        ]
-        result.extend(extra_tertier[:needed])
+        extra = [t for t in tertier if t["kode"] not in existing_parents]
+        result.extend(extra[:needed])
 
-    # Jika masih kurang, ambil sisa scored tanpa batasan level (best effort)
+    # Fallback best-effort
     if len(result) < top_n:
         used = {r["kode"] for r in result}
         fallback = [
             c for c in scored_candidates
-            if c.get("kode") not in used
-            and get_kode_level(c.get("kode", "")) >= 3
+            if c.get("kode") not in used and get_kode_level(c.get("kode", "")) >= 3
         ]
         result.extend(fallback[: top_n - len(result)])
 
@@ -301,13 +278,10 @@ def classify(
     top_n: int = 3,
 ) -> list:
     """
-    Jalankan full pipeline klasifikasi:
-    embed → search → score → recommend
-
-    Return: list of dict rekomendasi
+    Full pipeline: embed → search → score → recommend
     """
-    query_vec   = embed_query(model, inti_surat)
-    candidates  = search_candidates(index, query_vec, metadata, top_k=40)
-    scored      = score_candidates(candidates)
+    query_vec       = embed_query(model, inti_surat)
+    candidates      = search_candidates(index, query_vec, metadata, top_k=40)
+    scored          = score_candidates(candidates)
     recommendations = get_recommendations(scored, top_n=top_n)
     return recommendations
