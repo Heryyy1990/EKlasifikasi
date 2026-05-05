@@ -6,31 +6,37 @@ from google import genai
 import json
 
 # ==========================================
-# 1. KONFIGURASI & PROMPT
+# 1. KONFIGURASI & PROMPT ULTRA-KEJAM
 # ==========================================
 st.set_page_config(page_title="SIKAP App", page_icon="🗂️", layout="centered")
 
-EXTRACTION_PROMPT = """Anda adalah Arsiparis Senior Pemerintah Daerah.
-Tugas Anda menganalisis perihal surat dan mengekstraknya ke dalam format JSON untuk sistem Vector Database.
+EXTRACTION_PROMPT = """Anda adalah Arsiparis Senior yang sangat galak dan presisi.
+Tugas Anda menerjemahkan perihal surat dari user menjadi KATA KUNCI BIROKRASI MURNI.
 
-ATURAN MUTLAK:
-1. "intent_query": Hasilkan 3-6 kata kunci PENCARIAN. Abaikan kata (surat, permohonan). Jika menyangkut gedung/fasilitas instansi, gunakan frasa "barang milik daerah" atau "aset".
-2. "domain_prediksi": Prediksi domain utama (Pilih salah satu: umum, pemerintahan, politik, keamanan, kesejahteraan rakyat, perekonomian, pekerjaan umum, pengawasan, kepegawaian, keuangan).
-3. "activity_prediksi": Prediksi sub-kategorinya (misal: perlengkapan, pertanahan, ketatausahaan).
+ATURAN MUTLAK (JIKA DILANGGAR ANDA GAGAL):
+1. HAPUS SEMUA kata pengantar (surat, permohonan, laporan, penyampaian).
+2. HAPUS SEMUA nama lokasi/objek spesifik (contoh: perpustakaan, sekolah, puskesmas, mobil, jalan, dprd, bupati).
+3. HANYA tinggalkan TINDAKAN ADMINISTRATIF atau SUBJEK BIROKRASI (contoh: sertifikat tanah, aset daerah, pengadaan barang, perjalanan dinas).
+4. Output MAKSIMAL 2-4 kata saja. Tidak boleh lebih!
+
+Contoh 1:
+Input: "permohonan surat sertifikat tanah untuk pembangunan perpustakaan"
+Output: "sertifikat tanah aset" (Kata 'perpustakaan' WAJIB hilang total!)
+
+Contoh 2:
+Input: "Laporan kerusakan mobil dinas bupati"
+Output: "pemeliharaan kendaraan dinas"
 
 Input Surat: "{input_text}"
 
-HANYA KELUARKAN JSON VALID TANPA MARKDOWN.
-Contoh format:
+HANYA KELUARKAN JSON VALID.
 {{
-  "intent_query": "sertifikasi legalitas tanah barang milik daerah",
-  "domain_prediksi": "umum",
-  "activity_prediksi": "perlengkapan"
+  "intent_query": "kata kunci birokrasi murni"
 }}
 """
 
 # ==========================================
-# 2. FUNGSI SISTEM (MESIN SIKAP)
+# 2. FUNGSI SISTEM (MURNI SEMANTIC SEARCH)
 # ==========================================
 @st.cache_resource
 def load_system():
@@ -46,14 +52,13 @@ def extract_intent(client, input_text, prompt_template):
         model='gemini-2.5-flash',
         contents=prompt,
     )
-    clean_text = response.text.strip().replace("```json", "").replace("```", "")
+    clean_text = response.text.strip().replace("```json", "").replace("
+```", "")
     try:
         return json.loads(clean_text)
     except Exception:
         return {
-            "intent_query": clean_text[:100], 
-            "domain_prediksi": "", 
-            "activity_prediksi": ""
+            "intent_query": clean_text[:50]
         }
 
 def build_hierarchy_string(kode, kode_dict):
@@ -70,9 +75,8 @@ def build_hierarchy_string(kode, kode_dict):
     return " -> ".join(hierarchy)
 
 def search_classification(model, index, df, kode_dict, intent_json, top_k=30):
+    # Hanya fokus pada query murni, lupakan domain/activity yang tidak akurat
     query_text = intent_json.get('intent_query', '')
-    domain_prediksi = str(intent_json.get('domain_prediksi', '')).lower()
-    activity_prediksi = str(intent_json.get('activity_prediksi', '')).lower()
     
     query_vector = model.encode([query_text], normalize_embeddings=True)
     distances, indices = index.search(query_vector, top_k)
@@ -84,25 +88,19 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=30):
         kode = str(row['kode'])
         level = len(kode.split('.'))
         
+        # Buang kode Primer (1) dan Sekunder (2)
         if level < 3:
             continue
             
-        faiss_score = float(distances[0][i])
-        domain_row = str(row.get('domain', '')).lower()
-        activity_row = str(row.get('activity', '')).lower()
-        
-        domain_match = 1.0 if domain_prediksi and domain_prediksi in domain_row else 0.0
-        activity_match = 1.0 if activity_prediksi and activity_prediksi in activity_row else 0.0
-        
-        final_score = (faiss_score * 0.7) + (domain_match * 0.2) + (activity_match * 0.1)
+        # Gunakan 100% skor kemiripan Vektor dari FAISS (Jauh lebih akurat)
+        score = float(distances[0][i])
         hierarchy_str = build_hierarchy_string(kode, kode_dict)
         
         results.append({
             'kode': kode,
             'uraian': row['uraian'],
             'level': level,
-            'score': final_score,
-            'faiss_score': faiss_score,
+            'score': score,
             'hierarchy': hierarchy_str
         })
         
@@ -112,6 +110,7 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=30):
     level_4_results = sorted(level_4_results, key=lambda x: x['score'], reverse=True)
     final_results = level_4_results[:3]
     
+    # Fallback ke Tersier
     if len(final_results) < 3:
         needed = 3 - len(final_results)
         level_3_results = sorted(level_3_results, key=lambda x: x['score'], reverse=True)
@@ -125,7 +124,7 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=30):
 # ==========================================
 st.title("🗂️ SIKAP")
 st.subheader("Sistem Informasi Klasifikasi Arsip Pintar")
-st.write("Masukkan perihal/uraian surat. AI akan mencari rekomendasi klasifikasi paling presisi.")
+st.write("Masukkan uraian surat. AI akan membersihkan kalimat ambigu dan mencari klasifikasi arsip yang tepat.")
 
 with st.spinner("Menyiapkan Sistem..."):
     model, index, df, kode_dict = load_system()
@@ -144,13 +143,12 @@ if st.button("Cari Kode Klasifikasi", type="primary"):
         st.warning("Silakan ketik uraian surat terlebih dahulu.")
     else:
         try:
-            with st.spinner("🤖 Menganalisis konteks surat..."):
+            with st.spinner("🤖 Mengisolasi kata kunci birokrasi..."):
                 intent_json = extract_intent(client, user_input, EXTRACTION_PROMPT)
             
             st.success(f"**Vektor Kata Kunci:** {intent_json.get('intent_query', 'N/A')}")
-            st.info(f"**Prediksi Kategori:** {intent_json.get('domain_prediksi', 'N/A')} -> {intent_json.get('activity_prediksi', 'N/A')}")
             
-            with st.spinner("🔍 Mencocokkan data..."):
+            with st.spinner("🔍 Memindai database klasifikasi..."):
                 rekomendasi = search_classification(model, index, df, kode_dict, intent_json)
                 
             if rekomendasi:
@@ -160,7 +158,7 @@ if st.button("Cari Kode Klasifikasi", type="primary"):
                     with st.container():
                         st.markdown(f"#### {idx + 1}. Kode: **{rec['kode']}**")
                         st.markdown(f"**Uraian:** {rec['uraian']}")
-                        st.markdown(f"**Tingkat Akurasi Final:** `{rec['score']:.4f}`")
+                        st.markdown(f"**Tingkat Kecocokan:** `{rec['score']:.4f}`")
                         st.info(f"**Jejak Hierarki:**\n\n{rec['hierarchy']}")
                         st.markdown("<br>", unsafe_allow_html=True)
             else:
