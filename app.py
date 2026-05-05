@@ -3,18 +3,15 @@ from google import genai
 from utils import load_system, extract_intent, search_classification
 from prompts import EXTRACTION_PROMPT
 
-# Konfigurasi Halaman
 st.set_page_config(page_title="SIKAP App", page_icon="🗂️", layout="centered")
 
 st.title("🗂️ SIKAP")
 st.subheader("Sistem Informasi Klasifikasi Arsip Pintar")
 st.write("Masukkan perihal/uraian surat yang panjang. AI akan memahami inti surat dan mencarikan 3 rekomendasi klasifikasi paling presisi.")
 
-# 1. Load Sistem (Model, FAISS, Metadata)
 with st.spinner("Menyiapkan Sistem dan Database Klasifikasi..."):
     model, index, df, kode_dict = load_system()
 
-# 2. Inisialisasi API Key Google Gemini dari Streamlit Secrets
 try:
     api_key = st.secrets["GOOGLE_API_KEY"]
     client = genai.Client(api_key=api_key)
@@ -22,34 +19,27 @@ except Exception as e:
     st.error("API Key Google Gemini belum di-set di Streamlit Secrets!")
     st.stop()
 
-# 3. Input Pengguna
 user_input = st.text_area("Uraian Surat:", placeholder="Contoh: Mohon bantuan penerbitan surat pengadaan sistem arsip digital tahun 2026...", height=120)
 
-# 4. Tombol Eksekusi
 if st.button("Cari Kode Klasifikasi", type="primary"):
     if not user_input.strip():
         st.warning("Silakan ketik uraian surat terlebih dahulu.")
     else:
         try:
-            # Tahap 1: Ekstraksi Gemini ke JSON
             with st.spinner("🤖 Menggunakan Gemini untuk menganalisis konteks surat..."):
                 intent_json = extract_intent(client, user_input, EXTRACTION_PROMPT)
             
-            # Tampilkan hasil ektraksi agar user tahu
             st.success(f"**Vektor Kata Kunci:** {intent_json.get('intent_query', 'N/A')}")
             st.info(f"**Prediksi Kategori:** {intent_json.get('domain_prediksi', 'N/A')} ➔ {intent_json.get('activity_prediksi', 'N/A')}")
             
-            # Tahap 2: Semantic Search dengan Vektor & Scoring
             with st.spinner("🔍 Mencocokkan hierarki FAISS dan Metadata..."):
                 rekomendasi = search_classification(model, index, df, kode_dict, intent_json)
                 
-            # Tahap 3: Tampilkan Hasil
             if rekomendasi:
                 st.markdown("---")
                 st.markdown("### 🏆 3 Rekomendasi Teratas")
                 
                 for idx, rec in enumerate(rekomendasi):
-                    # Desain Card Sederhana
                     with st.container():
                         st.markdown(f"#### {idx + 1}. Kode: **{rec['kode']}**")
                         st.markdown(f"**Uraian:** {rec['uraian']}")
