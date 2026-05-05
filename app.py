@@ -6,51 +6,65 @@ from google import genai
 import json
 
 # ==========================================
-# 1. KONFIGURASI & PROMPT PENALARAN MURNI
+# 1. KONFIGURASI HALAMAN
 # ==========================================
 st.set_page_config(page_title="SIKAP App", page_icon="🗂️", layout="centered")
 
-# PROMPT INI MEMAKSA GEMINI BERPIKIR SECARA FUNGSIONAL PEMERINTAHAN
-EXTRACTION_PROMPT = """Anda adalah analis sistem klasifikasi arsip pemerintah.
-Tugas Anda adalah membedah fungsi organisasi dari uraian surat yang diberikan.
-
-LOGIKA BERPIKIR:
-1. Identifikasi SUBSTANSI masalah (apa yang sedang diurus?).
-2. Identifikasi FUNGSI organisasi (siapa yang mengurus? apakah pengawasan, perencanaan, atau operasional?).
-3. Tentukan KODE PREFIX (Sekunder) yang paling logis sesuai standar klasifikasi 000-900 (misal: 700.1 untuk pengawasan internal, 500.17 untuk pertanahan, dll).
-
-Output HARUS dalam format JSON:
-{{
-  "analisis_masalah": "inti urusan birokrasi",
-  "prefix_lock": "KODE PREFIX HASIL NALAR ANDA"
-}}
-
-Input: "{input_text}"
-HANYA KELUARKAN JSON VALID TANPA MARKDOWN.
-"""
-
 # ==========================================
-# 2. FUNGSI MESIN (SMART FILTERING)
+# 2. MESIN SISTEM (LOAD DATA & GENERATE MENU)
 # ==========================================
 @st.cache_resource
 def load_system():
+    # Load Model & FAISS
     model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
     index = faiss.read_index('vector_sikap_minilm.faiss')
+    
+    # Load Metadata Asli Anda
     df = pd.read_pickle('metadata_sikap.pkl')
-    kode_dict = dict(zip(df['kode'].astype(str), df['uraian']))
-    return model, index, df, kode_dict
+    
+    # Ambil Daftar Sekunder (Kode dengan 1 titik, misal 500.17) untuk "Menu" Gemini
+    # Ini memastikan Gemini hanya memilih kode yang BENAR-BENAR ADA di metadata Anda
+    df['kode_str'] = df['kode'].astype(str)
+    df_sekunder = df[df['kode_str'].str.count('\.') == 1][['kode_str', 'uraian']].drop_duplicates()
+    menu_sekunder = df_sekunder.apply(lambda x: f"{x['kode_str']} ({x['uraian']})", axis=1).tolist()
+    
+    kode_dict = dict(zip(df['kode_str'], df['uraian']))
+    
+    return model, index, df, kode_dict, menu_sekunder
 
-def extract_intent(client, input_text, prompt_template):
-    prompt = prompt_template.format(input_text=input_text)
+def extract_intent_with_context(client, input_text, menu_sekunder):
+    # Kirim daftar kode asli Anda ke Gemini sebagai referensi utama
+    menu_text = "\n".join(menu_sekunder[:100]) # Ambil 100 pertama agar tidak kepanjangan
+    
+    prompt = f"""Anda adalah asisten arsiparis profesional.
+Diberikan uraian surat, tugas Anda adalah memilih satu KODE SEKUNDER yang paling relevan dari daftar resmi metadata kami.
+
+DAFTAR KODE SEKUNDER RESMI:
+{menu_text}
+
+TUGAS:
+1. Analisis inti urusan dari surat user.
+2. Pilih satu KODE (hanya angka kodenya saja) dari daftar di atas yang paling cocok.
+3. Jika surat tentang Sertifikat Tanah/Pertanahan, pastikan pilih rumpun Pertanahan (500.17).
+
+Input User: "{input_text}"
+
+HANYA KELUARKAN JSON VALID:
+{{
+  "inti_urusan": "ringkasan urusan",
+  "kode_lock": "NOMOR KODE YANG DIPILIH"
+}}
+"""
     response = client.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
     )
-    clean_text = response.text.strip().replace("```json", "").replace("```", "")
+    clean_text = response.text.strip().replace("```json", "").replace("
+```", "")
     try:
         return json.loads(clean_text)
     except:
-        return {"analisis_masalah": input_text, "prefix_lock": ""}
+        return {"inti_urusan": input_text, "kode_lock": ""}
 
 def build_hierarchy_string(kode, kode_dict):
     parts = str(kode).split('.')
@@ -64,8 +78,8 @@ def build_hierarchy_string(kode, kode_dict):
     return " -> ".join(hierarchy)
 
 def search_classification(model, index, df, kode_dict, intent_json, top_k=200):
-    query_text = intent_json.get('analisis_masalah', '')
-    prefix_lock = str(intent_json.get('prefix_lock', ''))
+    query_text = intent_json.get('inti_urusan', '')
+    kode_lock = str(intent_json.get('kode_lock', ''))
     
     query_vector = model.encode([query_text], normalize_embeddings=True)
     distances, indices = index.search(query_vector, top_k)
@@ -74,36 +88,32 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=200):
     for i, idx in enumerate(indices[0]):
         if idx == -1: continue 
         row = df.iloc[idx]
-        kode = str(row['kode'])
-        level = len(kode.split('.'))
+        kode = str(row['kode_str'])
         
-        # 1. HANYA AMBIL KODE TERSIER/KUARTIER
-        if level < 3: continue
+        # Filter: Hanya ambil level detail (3 atau 4)
+        if kode.count('.') < 2: continue
             
-        # 2. FILTER KETAT BERDASARKAN HASIL NALAR GEMINI
-        if prefix_lock and not kode.startswith(prefix_lock):
+        # FILTER KUNCI: Harus diawali kode sekunder yang dipilih Gemini
+        if kode_lock and not kode.startswith(kode_lock):
             continue
             
         results.append({
             'kode': kode,
             'uraian': row['uraian'],
-            'level': level,
             'score': float(distances[0][i]),
             'hierarchy': build_hierarchy_string(kode, kode_dict)
         })
         
-    # Urutkan berdasarkan skor tertinggi
-    results = sorted(results, key=lambda x: x['score'], reverse=True)
-    return results[:3]
+    return sorted(results, key=lambda x: x['score'], reverse=True)[:3]
 
 # ==========================================
 # 3. ANTARMUKA PENGGUNA (UI)
 # ==========================================
-st.title("🗂️ SIKAP - Logic Engine")
-st.subheader("Sistem Informasi Klasifikasi Arsip Pintar (Muna Barat)")
+st.title("🗂️ SIKAP - Metadata-Driven Mode")
+st.write("Sistem yang benar-benar membaca metadata Anda untuk klasifikasi presisi.")
 
-with st.spinner("Mengaktifkan Nalar AI..."):
-    model, index, df, kode_dict = load_system()
+with st.spinner("Membaca Metadata & Menyiapkan Vektor..."):
+    model, index, df, kode_dict, menu_sekunder = load_system()
 
 try:
     client = genai.Client(api_key=st.secrets["GOOGLE_API_KEY"])
@@ -111,25 +121,24 @@ except:
     st.error("API Key Bermasalah!")
     st.stop()
 
-user_input = st.text_area("Input Perihal Surat:", placeholder="Misal: Laporan hasil evaluasi inspektorat...", height=100)
+user_input = st.text_area("Input Uraian Surat:", placeholder="Misal: Sertifikat tanah pembangunan perpustakaan...", height=100)
 
-if st.button("Bedah Klasifikasi", type="primary"):
-    with st.spinner("🤖 AI sedang menalar rumpun klasifikasi..."):
-        intent_json = extract_intent(client, user_input, EXTRACTION_PROMPT)
+if st.button("Analisis Klasifikasi", type="primary"):
+    with st.spinner("🤖 Gemini sedang mencocokkan dengan daftar Sekunder Anda..."):
+        intent_json = extract_intent_with_context(client, user_input, menu_sekunder)
     
-    lock = intent_json.get('prefix_lock', 'Bebas')
-    st.info(f"**Analisis Masalah:** {intent_json.get('analisis_masalah')} | **Prefix Terkunci:** 🔒 `{lock}`")
+    lock = intent_json.get('kode_lock', '')
+    st.info(f"**Inti Urusan:** {intent_json.get('inti_urusan')} | **Rumpun Terkunci:** 🔒 `{lock}`")
     
-    with st.spinner("🔍 Mencari kode detail dalam rumpun tersebut..."):
+    with st.spinner("🔍 Mencari kode detail di dalam rumpun tersebut..."):
         rekomendasi = search_classification(model, index, df, kode_dict, intent_json)
         
     if rekomendasi:
         st.markdown("---")
         for idx, rec in enumerate(rekomendasi):
-            with st.container():
-                st.markdown(f"#### {idx + 1}. Kode: **{rec['kode']}**")
-                st.write(f"**Uraian:** {rec['uraian']}")
-                st.info(f"**Jejak Hierarki:**\n{rec['hierarchy']}")
-                st.markdown("---")
+            st.subheader(f"{idx+1}. Kode: {rec['kode']}")
+            st.write(f"**Uraian:** {rec['uraian']}")
+            st.caption(f"**Jejak Hierarki:** {rec['hierarchy']}")
+            st.markdown("---")
     else:
-        st.warning("Tidak ditemukan kode detail dalam rumpun tersebut. AI mungkin salah menentukan prefix, silakan coba lagi.")
+        st.warning("Tidak ditemukan kode detail. Cobalah untuk memperjelas uraian surat.")
