@@ -52,8 +52,7 @@ def extract_intent(client, input_text, prompt_template):
         model='gemini-2.5-flash',
         contents=prompt,
     )
-    clean_text = response.text.strip().replace("```json", "").replace("
-```", "")
+    clean_text = response.text.strip().replace("```json", "").replace("```", "")
     try:
         return json.loads(clean_text)
     except Exception:
