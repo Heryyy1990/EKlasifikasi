@@ -6,31 +6,31 @@ from google import genai
 import json
 
 # ==========================================
-# 1. KONFIGURASI & PROMPT
+# 1. KONFIGURASI & PROMPT CERDAS (TANPA ASUMSI BODOH)
 # ==========================================
 st.set_page_config(page_title="SIKAP App", page_icon="🗂️", layout="centered")
 
-EXTRACTION_PROMPT = """Anda adalah pakar tata naskah dinas tingkat nasional.
-Surat dari user sering kali rancu. Tugas Anda adalah menerjemahkannya ke dalam "Bahasa Mesin" yang optimal untuk pencarian database arsip.
+EXTRACTION_PROMPT = """Anda adalah asisten arsiparis. Tugas Anda mengekstrak niat surat menjadi frasa pencarian yang spesifik untuk database vektor.
 
 ATURAN MUTLAK:
-1. Buang kata: surat, permohonan, laporan, penyampaian.
-2. Ubah nama tempat/objek (perpustakaan, mobil, jalan, sekolah) menjadi istilah birokrasi baku (aset, barang milik daerah, infrastruktur).
-3. Output HARUS berformat JSON dengan 2 kunci: "query_kalimat" dan "keywords".
+1. Hapus kata: surat, permohonan, laporan, penyampaian.
+2. Hapus nama objek/lokasi spesifik (contoh: perpustakaan, puskesmas, jalan, bupati).
+3. JIKA membahas SERTIFIKAT TANAH, fokuskan pada urusan PERTANAHAN. Gunakan frasa baku: "penguatan hak atas tanah" atau "administrasi pertanahan". (JANGAN arahkan ke sengketa atau transmigrasi).
 
-Contoh Input: "permohonan surat sertifikat tanah untuk pembangunan perpustakaan"
+Contoh:
+Input: "permohonan surat sertifikat tanah untuk pembangunan perpustakaan"
 Output JSON:
 {{
-  "query_kalimat": "pengurusan administrasi pertanahan dan legalitas aset barang milik daerah",
-  "keywords": ["pertanahan", "aset", "tanah", "barang milik daerah"]
+  "query_kalimat": "penguatan hak atas tanah administrasi pertanahan",
+  "keywords": ["pertanahan", "hak atas tanah"]
 }}
 
 Input Surat: "{input_text}"
-HANYA KELUARKAN JSON VALID.
+HANYA KELUARKAN JSON VALID TANPA MARKDOWN.
 """
 
 # ==========================================
-# 2. FUNGSI SISTEM (TRUE HYBRID SEARCH)
+# 2. FUNGSI SISTEM
 # ==========================================
 @st.cache_resource
 def load_system():
@@ -68,12 +68,11 @@ def build_hierarchy_string(kode, kode_dict):
         hierarchy.append(f"{current_kode} ({nama})")
     return " -> ".join(hierarchy)
 
-def search_classification(model, index, df, kode_dict, intent_json, top_k=50):
+def search_classification(model, index, df, kode_dict, intent_json, top_k=30):
     query_text = intent_json.get('query_kalimat', '')
     keywords = intent_json.get('keywords', [])
     
     query_vector = model.encode([query_text], normalize_embeddings=True)
-    # Ambil 50 kandidat untuk jaring yang lebih luas
     distances, indices = index.search(query_vector, top_k)
     
     results = []
@@ -83,24 +82,20 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=50):
         kode = str(row['kode'])
         level = len(kode.split('.'))
         
-        # Buang kode Primer (1) dan Sekunder (2)
+        # Wajib buang kode Primer (1) dan Sekunder (2)
         if level < 3:
             continue
             
         faiss_score = float(distances[0][i])
         hierarchy_str = build_hierarchy_string(kode, kode_dict)
         
-        # =======================================================
-        # LEXICAL BOOST (SUNTIKAN POIN JIKA KATA KUNCI COCOK)
-        # =======================================================
+        # Suntikan nilai agar tidak meleset ke sub-kategori aneh
         teks_target = (str(row['uraian']) + " " + hierarchy_str).lower()
         bonus_score = 0.0
-        matched_kws = []
         
         for kw in keywords:
             if kw.lower() in teks_target:
-                bonus_score += 0.08  # Suntikan nilai agar naik peringkat
-                matched_kws.append(kw.lower())
+                bonus_score += 0.08
                 
         final_score = faiss_score + bonus_score
         
@@ -109,20 +104,15 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=50):
             'uraian': row['uraian'],
             'level': level,
             'score': final_score,
-            'faiss_score': faiss_score,
-            'bonus': bonus_score,
-            'matched': ", ".join(matched_kws),
             'hierarchy': hierarchy_str
         })
         
-    # Saring Level 4 (Kuartier) dan Level 3 (Tersier)
     level_4_results = [r for r in results if r['level'] >= 4]
     level_3_results = [r for r in results if r['level'] == 3]
     
     level_4_results = sorted(level_4_results, key=lambda x: x['score'], reverse=True)
     final_results = level_4_results[:3]
     
-    # Fallback ke Tersier jika Kuartier kurang dari 3
     if len(final_results) < 3:
         needed = 3 - len(final_results)
         level_3_results = sorted(level_3_results, key=lambda x: x['score'], reverse=True)
@@ -136,7 +126,7 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=50):
 # ==========================================
 st.title("🗂️ SIKAP")
 st.subheader("Sistem Informasi Klasifikasi Arsip Pintar")
-st.write("Masukkan perihal/uraian surat. AI akan membersihkan kalimat dan mencari klasifikasi arsip yang tepat.")
+st.write("Sistem Cerdas Tata Naskah Dinas Kabupaten Muna Barat")
 
 with st.spinner("Menyiapkan Sistem..."):
     model, index, df, kode_dict = load_system()
@@ -148,20 +138,19 @@ except Exception:
     st.error("API Key Google Gemini belum di-set di Streamlit Secrets!")
     st.stop()
 
-user_input = st.text_area("Uraian Surat:", placeholder="Ketik perihal surat di sini...", height=120)
+user_input = st.text_area("Uraian Surat:", placeholder="Contoh: permohonan sertifikat tanah...", height=120)
 
 if st.button("Cari Kode Klasifikasi", type="primary"):
     if not user_input.strip():
         st.warning("Silakan ketik uraian surat terlebih dahulu.")
     else:
         try:
-            with st.spinner("🤖 Menganalisis konteks tata naskah..."):
+            with st.spinner("🤖 Menganalisis niat surat..."):
                 intent_json = extract_intent(client, user_input, EXTRACTION_PROMPT)
             
-            st.success(f"**Kalimat Semantik:** {intent_json.get('query_kalimat', 'N/A')}")
-            st.info(f"**Kata Kunci (Boost):** {', '.join(intent_json.get('keywords', []))}")
+            st.success(f"**Target Vektor Pemda:** {intent_json.get('query_kalimat', 'N/A')}")
             
-            with st.spinner("🔍 Memindai database klasifikasi..."):
+            with st.spinner("🔍 Mencocokkan database..."):
                 rekomendasi = search_classification(model, index, df, kode_dict, intent_json)
                 
             if rekomendasi:
@@ -171,15 +160,10 @@ if st.button("Cari Kode Klasifikasi", type="primary"):
                     with st.container():
                         st.markdown(f"#### {idx + 1}. Kode: **{rec['kode']}**")
                         st.markdown(f"**Uraian:** {rec['uraian']}")
-                        st.markdown(f"**Tingkat Akurasi (Final):** `{rec['score']:.4f}`")
-                        
-                        if rec['bonus'] > 0:
-                            st.caption(f"*(Mendapat Bonus Keyword: {rec['matched']} | FAISS Dasar: {rec['faiss_score']:.4f})*")
-                            
                         st.info(f"**Jejak Hierarki:**\n\n{rec['hierarchy']}")
                         st.markdown("<br>", unsafe_allow_html=True)
             else:
-                st.warning("Tidak ditemukan klasifikasi yang relevan pada level Tersier/Kuartier.")
+                st.warning("Tidak ditemukan klasifikasi yang relevan.")
                 
         except Exception as e:
             st.error(f"Terjadi kesalahan: {e}")
