@@ -8,7 +8,7 @@ st.set_page_config(page_title="SIKAP App", page_icon="🗂️", layout="centered
 
 st.title("🗂️ SIKAP")
 st.subheader("Sistem Informasi Klasifikasi Arsip Pintar")
-st.write("Masukkan perihal/uraian surat yang panjang. AI akan memahami inti surat dan mencarikan 3 rekomendasi klasifikasi paling presisi (sampai level Kuartier/Tersier).")
+st.write("Masukkan perihal/uraian surat yang panjang. AI akan memahami inti surat dan mencarikan 3 rekomendasi klasifikasi paling presisi.")
 
 # 1. Load Sistem (Model, FAISS, Metadata)
 with st.spinner("Menyiapkan Sistem dan Database Klasifikasi..."):
@@ -31,16 +31,17 @@ if st.button("Cari Kode Klasifikasi", type="primary"):
         st.warning("Silakan ketik uraian surat terlebih dahulu.")
     else:
         try:
-            # Tahap 1: Ekstraksi Gemini
-            with st.spinner("🤖 Menggunakan Gemini untuk merangkum inti surat..."):
-                inti_surat = extract_intent(client, user_input, EXTRACTION_PROMPT)
+            # Tahap 1: Ekstraksi Gemini ke JSON
+            with st.spinner("🤖 Menggunakan Gemini untuk menganalisis konteks surat..."):
+                intent_json = extract_intent(client, user_input, EXTRACTION_PROMPT)
             
             # Tampilkan hasil ektraksi agar user tahu
-            st.success(f"**Inti Pencarian:** {inti_surat}")
+            st.success(f"**Vektor Kata Kunci:** {intent_json.get('intent_query', 'N/A')}")
+            st.info(f"**Prediksi Kategori:** {intent_json.get('domain_prediksi', 'N/A')} ➔ {intent_json.get('activity_prediksi', 'N/A')}")
             
-            # Tahap 2: Semantic Search dengan Vektor
-            with st.spinner("🔍 Mencocokkan dengan database klasifikasi (FAISS)..."):
-                rekomendasi = search_classification(model, index, df, kode_dict, inti_surat)
+            # Tahap 2: Semantic Search dengan Vektor & Scoring
+            with st.spinner("🔍 Mencocokkan hierarki FAISS dan Metadata..."):
+                rekomendasi = search_classification(model, index, df, kode_dict, intent_json)
                 
             # Tahap 3: Tampilkan Hasil
             if rekomendasi:
@@ -52,7 +53,8 @@ if st.button("Cari Kode Klasifikasi", type="primary"):
                     with st.container():
                         st.markdown(f"#### {idx + 1}. Kode: **{rec['kode']}**")
                         st.markdown(f"**Uraian:** {rec['uraian']}")
-                        st.markdown(f"**Tingkat Akurasi (Vektor):** `{rec['score']:.4f}`")
+                        st.markdown(f"**Tingkat Akurasi Final:** `{rec['score']:.4f}`")
+                        st.caption(f"*(Skor Vektor Asli: {rec['faiss_score']:.4f})*")
                         st.info(f"**Jejak Hierarki:**\n\n{rec['hierarchy']}")
                         st.markdown("<br>", unsafe_allow_html=True)
             else:
