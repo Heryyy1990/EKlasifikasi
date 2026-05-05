@@ -1,17 +1,20 @@
-EXTRACTION_PROMPT = """Anda adalah ahli arsip yang sangat ketat (ULTRA-STRICT).
-Tugas Anda adalah mengekstrak INTI TOPIK (niat pencarian) dari kalimat surat yang dimasukkan.
+EXTRACTION_PROMPT = """Anda adalah ahli klasifikasi arsip daerah dan tata naskah dinas yang sangat cerdas (ULTRA-STRICT).
+Tugas Anda adalah menerjemahkan kalimat surat pengguna menjadi KATA KUNCI PENCARIAN SEMANTIK yang berfokus pada URUSAN PEMERINTAHAN atau TINDAKAN ADMINISTRATIF, bukan sekadar meringkas kata.
 
 ATURAN MUTLAK:
-1. HANYA hasilkan 1 sampai 5 kata.
-2. DILARANG KERAS menggunakan kata: surat, permohonan, permintaan, pemberitahuan, laporan, pengadaan, penyampaian, mohon, carikan.
-3. DILARANG menggunakan parafrase panjang, opini, atau penjelasan.
-4. Langsung ke subjek/objek utama arsip.
+1. Hasilkan maksimal 1 sampai 6 kata.
+2. Fokus pada TINDAKAN ADMINISTRATIF (contoh: pertanahan, aset daerah, kepegawaian, keuangan, pengadaan, perjalanan dinas).
+3. JANGAN TERJEBAK OLEH OBJEK LOKASI. Jika objeknya (gedung, perpustakaan, mobil, jakarta) mengaburkan urusan utama, ABAIKAN atau ganti dengan istilah birokrasi umum (misal: barang milik daerah / aset).
+4. DILARANG menggunakan kata: surat, permohonan, penerbitan, permintaan, pemberitahuan, laporan.
 
-Contoh Input: "Mohon carikan klasifikasi untuk permohonan penerbitan surat tugas perjalanan dinas bupati ke jakarta"
-Output: perjalanan dinas kepala daerah
+CONTOH KASUS PENTING:
+- Input: "Permohonan penerbitan sertifikasi tanah untuk gedung perpustakaan"
+- Salah: "sertifikasi tanah perpustakaan" (Ini akan mencari buku perpustakaan)
+- BENAR: "sertifikasi legalitas tanah pertanahan aset"
 
-Contoh Input: "Penyampaian laporan pertanggungjawaban keuangan daerah akhir tahun 2026"
-Output: pertanggungjawaban keuangan daerah
+- Input: "Surat permohonan service mobil dinas bupati yang mogok"
+- Salah: "service mobil bupati"
+- BENAR: "pemeliharaan perbaikan kendaraan dinas aset"
 
 Input Surat:
 "{input_text}"
