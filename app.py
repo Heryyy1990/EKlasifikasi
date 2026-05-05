@@ -6,23 +6,28 @@ from google import genai
 import json
 
 # ==========================================
-# 1. KONFIGURASI & PROMPT CERDAS (TANPA ASUMSI BODOH)
+# 1. KONFIGURASI & PROMPT LOCKING (SATPAM)
 # ==========================================
 st.set_page_config(page_title="SIKAP App", page_icon="🗂️", layout="centered")
 
-EXTRACTION_PROMPT = """Anda adalah asisten arsiparis. Tugas Anda mengekstrak niat surat menjadi frasa pencarian yang spesifik untuk database vektor.
+# Ini adalah "Buku Saku" untuk Gemini agar bisa mengunci kode Sekunder dengan tepat
+EXTRACTION_PROMPT = """Anda adalah Arsiparis Pengendali. Tugas Anda mengekstrak niat surat dan MENENTUKAN KODE SEKUNDER (Prefix) dari tata naskah dinas.
 
-ATURAN MUTLAK:
-1. Hapus kata: surat, permohonan, laporan, penyampaian.
-2. Hapus nama objek/lokasi spesifik (contoh: perpustakaan, puskesmas, jalan, bupati).
-3. JIKA membahas SERTIFIKAT TANAH, fokuskan pada urusan PERTANAHAN. Gunakan frasa baku: "penguatan hak atas tanah" atau "administrasi pertanahan". (JANGAN arahkan ke sengketa atau transmigrasi).
+ATURAN KODE SEKUNDER (HAFALKAN!):
+- Jika tentang Tanah Instansi / Sertifikat Tanah Pemda -> "500.17" (Pertanahan)
+- Jika tentang Aset / Gedung / Barang Milik Daerah / Kendaraan -> "000.2" (Perlengkapan)
+- Jika tentang SPPD / Perjalanan Dinas -> "000.1" (Ketatausahaan)
+- Jika tentang Cuti / Izin Pegawai -> "800.1" (Kepegawaian)
+- Jika tentang Anggaran / Pencairan Dana -> "900.1" (Keuangan)
+- Jika di luar ini, kosongkan nilai "kode_sekunder_lock".
 
-Contoh:
-Input: "permohonan surat sertifikat tanah untuk pembangunan perpustakaan"
+ATURAN EKSTRAKSI: Hapus kata pengantar (surat, permohonan) dan nama lokasi/objek spesifik.
+
+Contoh Input: "permohonan surat sertifikat tanah untuk pembangunan perpustakaan"
 Output JSON:
 {{
   "query_kalimat": "penguatan hak atas tanah administrasi pertanahan",
-  "keywords": ["pertanahan", "hak atas tanah"]
+  "kode_sekunder_lock": "500.17"
 }}
 
 Input Surat: "{input_text}"
@@ -30,7 +35,7 @@ HANYA KELUARKAN JSON VALID TANPA MARKDOWN.
 """
 
 # ==========================================
-# 2. FUNGSI SISTEM
+# 2. FUNGSI SISTEM DENGAN FILTERING KETAT
 # ==========================================
 @st.cache_resource
 def load_system():
@@ -52,7 +57,7 @@ def extract_intent(client, input_text, prompt_template):
     except Exception:
         return {
             "query_kalimat": input_text,
-            "keywords": []
+            "kode_sekunder_lock": ""
         }
 
 def build_hierarchy_string(kode, kode_dict):
@@ -68,11 +73,12 @@ def build_hierarchy_string(kode, kode_dict):
         hierarchy.append(f"{current_kode} ({nama})")
     return " -> ".join(hierarchy)
 
-def search_classification(model, index, df, kode_dict, intent_json, top_k=30):
+def search_classification(model, index, df, kode_dict, intent_json, top_k=100):
     query_text = intent_json.get('query_kalimat', '')
-    keywords = intent_json.get('keywords', [])
+    kode_lock = intent_json.get('kode_sekunder_lock', '')
     
     query_vector = model.encode([query_text], normalize_embeddings=True)
+    # Kita ambil 100 teratas dari FAISS untuk disaring
     distances, indices = index.search(query_vector, top_k)
     
     results = []
@@ -86,26 +92,27 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=30):
         if level < 3:
             continue
             
+        # LOGIKA LOCKING (PENGUNCIAN)
+        # Jika Gemini memberikan kunci sekunder, buang semua kode yang tidak diawali kunci tersebut
+        if kode_lock and not kode.startswith(kode_lock):
+            continue
+            
         faiss_score = float(distances[0][i])
         hierarchy_str = build_hierarchy_string(kode, kode_dict)
-        
-        # Suntikan nilai agar tidak meleset ke sub-kategori aneh
-        teks_target = (str(row['uraian']) + " " + hierarchy_str).lower()
-        bonus_score = 0.0
-        
-        for kw in keywords:
-            if kw.lower() in teks_target:
-                bonus_score += 0.08
-                
-        final_score = faiss_score + bonus_score
         
         results.append({
             'kode': kode,
             'uraian': row['uraian'],
             'level': level,
-            'score': final_score,
+            'score': faiss_score,
             'hierarchy': hierarchy_str
         })
+        
+    # Jika karena suatu hal hasil filter kosong (misal Gemini salah kunci), 
+    # kita fallback (mundur) tanpa kunci
+    if not results and kode_lock:
+        intent_json['kode_sekunder_lock'] = ""
+        return search_classification(model, index, df, kode_dict, intent_json, top_k=30)
         
     level_4_results = [r for r in results if r['level'] >= 4]
     level_3_results = [r for r in results if r['level'] == 3]
@@ -126,7 +133,7 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=30):
 # ==========================================
 st.title("🗂️ SIKAP")
 st.subheader("Sistem Informasi Klasifikasi Arsip Pintar")
-st.write("Sistem Cerdas Tata Naskah Dinas Kabupaten Muna Barat")
+st.write("Dilengkapi arsitektur AI Multi-Tahap (Intent Locking + Semantic Search)")
 
 with st.spinner("Menyiapkan Sistem..."):
     model, index, df, kode_dict = load_system()
@@ -145,12 +152,16 @@ if st.button("Cari Kode Klasifikasi", type="primary"):
         st.warning("Silakan ketik uraian surat terlebih dahulu.")
     else:
         try:
-            with st.spinner("🤖 Menganalisis niat surat..."):
+            with st.spinner("🤖 Gemini sedang mengunci rumpun klasifikasi..."):
                 intent_json = extract_intent(client, user_input, EXTRACTION_PROMPT)
             
-            st.success(f"**Target Vektor Pemda:** {intent_json.get('query_kalimat', 'N/A')}")
+            kode_lock_display = intent_json.get('kode_sekunder_lock', 'Pencarian Bebas')
+            if not kode_lock_display: kode_lock_display = "Pencarian Bebas"
             
-            with st.spinner("🔍 Mencocokkan database..."):
+            st.success(f"**Target Vektor:** {intent_json.get('query_kalimat', 'N/A')}")
+            st.info(f"**Rumpun Terkunci (Prefix):** 🔒 `{kode_lock_display}`")
+            
+            with st.spinner("🔍 Memindai klaster yang dikunci..."):
                 rekomendasi = search_classification(model, index, df, kode_dict, intent_json)
                 
             if rekomendasi:
