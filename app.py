@@ -169,21 +169,15 @@ def extract_inti_surat(text: str, client: genai.Client) -> str:
     """
     Panggil Gemini Flash untuk mengekstrak inti surat.
     Satu API call per klik Proses.
-
-    PENTING — Gemini 2.5 Flash adalah thinking model:
-    Token berpikir ikut dihitung di max_output_tokens.
-    Solusi: thinking_budget=0 (matikan thinking untuk tugas sederhana ini).
+    Menggunakan google-genai SDK baru.
     """
     prompt = EXTRACT_INTI_PROMPT.format(text=text.strip())
     response = client.models.generate_content(
         model="gemini-2.5-flash",
         contents=prompt,
         config=types.GenerateContentConfig(
-            temperature=0.1,
-            max_output_tokens=50,           # cukup untuk 1-5 kata output
-            thinking_config=types.ThinkingConfig(
-                thinking_budget=0,          # matikan thinking mode
-            ),
+            temperature=0.1,        # deterministic & konsisten
+            max_output_tokens=30,   # inti surat pendek, hemat quota
         ),
     )
     inti = response.text.strip().lower()
