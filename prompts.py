@@ -1,36 +1,19 @@
-# ============================================================
-# prompts.py — Prompt template untuk ekstraksi inti surat
-# SIKAP — Sistem Klasifikasi Arsip Terpadu
-# ============================================================
+EXTRACTION_PROMPT = """Anda adalah ahli arsip yang sangat ketat (ULTRA-STRICT).
+Tugas Anda adalah mengekstrak INTI TOPIK (niat pencarian) dari kalimat surat yang dimasukkan.
 
-EXTRACT_INTI_PROMPT = """\
-Tugasmu adalah mengekstrak INTI TOPIK dari teks surat berikut.
+ATURAN MUTLAK:
+1. HANYA hasilkan 1 sampai 5 kata.
+2. DILARANG KERAS menggunakan kata: surat, permohonan, permintaan, pemberitahuan, laporan, pengadaan, penyampaian, mohon, carikan.
+3. DILARANG menggunakan parafrase panjang, opini, atau penjelasan.
+4. Langsung ke subjek/objek utama arsip.
 
-ATURAN WAJIB — HARUS DIPATUHI SEPENUHNYA:
-1. Keluarkan HANYA 1 sampai 5 kata
-2. Murni inti substansi/topik utama surat
-3. DILARANG menggunakan kata-kata administratif berikut:
-   surat, permohonan, permintaan, pemberitahuan, pengajuan,
-   laporan, undangan, penyampaian, terkait, perihal, mengenai,
-   kepada, dari, dengan hormat, bersama ini
-4. DILARANG membuat kalimat panjang
-5. DILARANG menambahkan opini, interpretasi, atau penjelasan
-6. Gunakan bahasa Indonesia ringkas
+Contoh Input: "Mohon carikan klasifikasi untuk permohonan penerbitan surat tugas perjalanan dinas bupati ke jakarta"
+Output: perjalanan dinas kepala daerah
 
-CONTOH BENAR:
-Input: "Permintaan pengadaan sistem arsip digital untuk mendukung pengelolaan dokumen"
-Output: pengadaan sistem arsip digital
+Contoh Input: "Penyampaian laporan pertanggungjawaban keuangan daerah akhir tahun 2026"
+Output: pertanggungjawaban keuangan daerah
 
-Input: "Surat permohonan cuti tahunan pegawai negeri sipil tahun 2024"
-Output: cuti tahunan pegawai
+Input Surat:
+"{input_text}"
 
-Input: "Pemberitahuan pelaksanaan diklat kepemimpinan tingkat II untuk pejabat eselon"
-Output: diklat kepemimpinan eselon
-
-Input: "Undangan rapat koordinasi perencanaan anggaran tahun depan"
-Output: rapat koordinasi anggaran
-
-Teks surat yang harus diproses:
-{text}
-
-Inti surat (1-5 kata saja, tanpa tanda baca):"""
+Output Inti:"""
