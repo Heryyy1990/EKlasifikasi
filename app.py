@@ -46,8 +46,8 @@ def extract_intent(client, input_text, prompt_template):
         model='gemini-2.5-flash',
         contents=prompt,
     )
-    clean_text = response.text.strip().replace("```json", "").replace("
-```", "")
+    clean_text = response.text.strip().replace("
+```json", "").replace("```", "")
     try:
         return json.loads(clean_text)
     except Exception:
@@ -85,7 +85,6 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=30):
         kode = str(row['kode'])
         level = len(kode.split('.'))
         
-        # Aturan Mutlak: Buang kode Primer (1) dan Sekunder (2)
         if level < 3:
             continue
             
@@ -114,7 +113,6 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=30):
     level_4_results = sorted(level_4_results, key=lambda x: x['score'], reverse=True)
     final_results = level_4_results[:3]
     
-    # Fallback ke Tersier jika Kuartier kurang dari 3
     if len(final_results) < 3:
         needed = 3 - len(final_results)
         level_3_results = sorted(level_3_results, key=lambda x: x['score'], reverse=True)
