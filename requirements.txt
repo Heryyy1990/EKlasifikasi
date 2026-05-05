@@ -1,8 +1,7 @@
---extra-index-url https://download.pytorch.org/whl/cpu
 torch
 torchvision
-streamlit==1.32.0
-pandas==2.2.1
-sentence-transformers==2.5.1
-faiss-cpu==1.8.0
-google-genai==0.3.0
+streamlit
+pandas
+sentence-transformers
+faiss-cpu
+google-genai
