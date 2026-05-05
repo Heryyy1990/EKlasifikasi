@@ -6,30 +6,25 @@ from google import genai
 import json
 
 # ==========================================
-# 1. KONFIGURASI & PROMPT PENALARAN ARSIP
+# 1. KONFIGURASI & PROMPT ANALISIS KONTEKS
 # ==========================================
 st.set_page_config(page_title="SIKAP App", page_icon="🗂️", layout="centered")
 
-# PROMPT TANPA KAMUS MANUAL - MEMAKSA GEMINI BERPIKIR LOGIS
-EXTRACTION_PROMPT = """Anda adalah pakar sistem klasifikasi arsip pemerintah (tata naskah dinas).
-User akan memberikan uraian surat yang panjang dan ambigu. 
+EXTRACTION_PROMPT = """Anda adalah analis urusan pemerintahan.
+Tugas Anda menentukan "Kategori Besar" urusan dari sebuah surat.
 
-Tugas Anda adalah berpikir secara hierarkis:
-1. Analisis subjek utama surat tersebut.
-2. Tentukan KODE PRIMER (000-900) yang paling relevan berdasarkan fungsi pemerintahan.
-3. Tentukan KODE SEKUNDER (Prefix dua tingkat, misal: 500.17 atau 000.2).
-
-Panduan Berpikir:
-- 000: Umum/Perlengkapan/Rumah Tangga/Kearsipan.
-- 100: Pemerintahan/Otonomi.
-- 400: Kesejahteraan Rakyat (Pendidikan/Kesehatan).
-- 500: Perekonomian (Pertanian/Pertanahan/Hutan).
-- 900: Keuangan.
+KATEGORI YANG TERSEDIA:
+- Perlengkapan / Aset (Jika terkait gedung, tanah instansi, kendaraan, barang)
+- Pertanahan (Jika terkait hak atas tanah, sertifikat tanah masyarakat/umum)
+- Kepegawaian (Jika terkait cuti, mutasi, diklat, perjalanan dinas)
+- Kearsipan / Tata Naskah (Jika terkait surat menyurat)
+- Keuangan (Jika terkait anggaran, pajak, gaji)
+- Umum (Jika urusan rutin lainnya)
 
 Output harus JSON:
 {{
-  "inti_masalah": "ringkasan 3 kata tanpa kata permohonan/surat",
-  "kode_lock": "KODE SEKUNDER HASIL ANALISIS ANDA"
+  "inti_masalah": "tindakan birokrasi singkat",
+  "kategori_besar": "Pilih salah satu kategori di atas"
 }}
 
 Input: "{input_text}"
@@ -37,7 +32,7 @@ HANYA JSON.
 """
 
 # ==========================================
-# 2. FUNGSI MESIN (LOCKED RETRIEVAL)
+# 2. FUNGSI MESIN (SMART MAPPING)
 # ==========================================
 @st.cache_resource
 def load_system():
@@ -57,7 +52,7 @@ def extract_intent(client, input_text, prompt_template):
     try:
         return json.loads(clean_text)
     except:
-        return {"inti_masalah": input_text, "kode_lock": ""}
+        return {"inti_masalah": input_text, "kategori_besar": "Umum"}
 
 def build_hierarchy_string(kode, kode_dict):
     parts = str(kode).split('.')
@@ -70,9 +65,9 @@ def build_hierarchy_string(kode, kode_dict):
         hierarchy.append(f"{current_kode} ({nama})")
     return " -> ".join(hierarchy)
 
-def search_classification(model, index, df, kode_dict, intent_json, top_k=150):
+def search_classification(model, index, df, kode_dict, intent_json, top_k=200):
     query_text = intent_json.get('inti_masalah', '')
-    kode_lock = intent_json.get('kode_lock', '')
+    kategori = intent_json.get('kategori_besar', '').lower()
     
     query_vector = model.encode([query_text], normalize_embeddings=True)
     distances, indices = index.search(query_vector, top_k)
@@ -82,14 +77,25 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=150):
         if idx == -1: continue 
         row = df.iloc[idx]
         kode = str(row['kode'])
+        uraian = str(row['uraian']).lower()
         level = len(kode.split('.'))
         
-        # 1. WAJIB LEVEL 3 (Tersier) ATAU 4 (Kuartier)
+        # Ambil hierarki lengkap untuk pengecekan rumpun
+        hierarchy_str = build_hierarchy_string(kode, kode_dict).lower()
+        
         if level < 3: continue
             
-        # 2. FILTER KETAT: Kode harus diawali dengan hasil analisa Gemini (kode_lock)
-        if kode_lock and not kode.startswith(kode_lock):
-            continue
+        # Pengecekan Rumpun (Smart Filter)
+        # Jika kategori adalah "Pertanahan", pastikan kata "pertanahan" atau "tanah" ada di hierarkinya
+        is_match = False
+        if "umum" in kategori: is_match = True # Umum boleh masuk mana saja
+        elif "pertanahan" in kategori and ("pertanahan" in hierarchy_str or "tanah" in hierarchy_str): is_match = True
+        elif "perlengkapan" in kategori and ("perlengkapan" in hierarchy_str or "aset" in hierarchy_str or "barang milik" in hierarchy_str): is_match = True
+        elif "kepegawaian" in kategori and ("kepegawaian" in hierarchy_str or "pegawai" in hierarchy_str): is_match = True
+        elif "keuangan" in kategori and ("keuangan" in hierarchy_str or "anggaran" in hierarchy_str): is_match = True
+        elif "kearsipan" in kategori and ("kearsipan" in hierarchy_str or "naskah" in hierarchy_str): is_match = True
+        
+        if not is_match: continue
             
         results.append({
             'kode': kode,
@@ -99,15 +105,14 @@ def search_classification(model, index, df, kode_dict, intent_json, top_k=150):
             'hierarchy': build_hierarchy_string(kode, kode_dict)
         })
         
-    # Urutkan berdasarkan level terdalam (Kuartier dulu baru Tersier)
-    results = sorted(results, key=lambda x: (x['level'], x['score']), reverse=True)
+    # Urutkan berdasarkan skor kemiripan tertinggi
+    results = sorted(results, key=lambda x: x['score'], reverse=True)
     return results[:3]
 
 # ==========================================
 # 3. UI
 # ==========================================
-st.title("🗂️ SIKAP - Intelligent Mode")
-st.write("Sistem Klasifikasi Otomatis dengan Penalaran Hierarki AI")
+st.title("🗂️ SIKAP - Smart Context Mode")
 
 with st.spinner("Loading..."):
     model, index, df, kode_dict = load_system()
@@ -119,14 +124,13 @@ except:
 
 user_input = st.text_area("Input Uraian Surat:", height=100)
 
-if st.button("Analisis Klasifikasi", type="primary"):
-    with st.spinner("🤖 AI sedang membedah struktur klasifikasi..."):
+if st.button("Cari Klasifikasi", type="primary"):
+    with st.spinner("🤖 Menganalisis urusan..."):
         intent_json = extract_intent(client, user_input, EXTRACTION_PROMPT)
     
-    lock = intent_json.get('kode_lock', '')
-    st.info(f"**Analisis Masalah:** {intent_json.get('inti_masalah')} | **Kode Terkunci:** `{lock}`")
+    st.info(f"**Inti Masalah:** {intent_json.get('inti_masalah')} | **Rumpun Terdeteksi:** `{intent_json.get('kategori_besar')}`")
     
-    with st.spinner("🔍 Mencari kode tersier/kuartier..."):
+    with st.spinner("🔍 Memfilter database sesuai rumpun..."):
         rekomendasi = search_classification(model, index, df, kode_dict, intent_json)
         
     if rekomendasi:
@@ -137,4 +141,4 @@ if st.button("Analisis Klasifikasi", type="primary"):
             st.caption(f"**Hierarki:** {rec['hierarchy']}")
             st.markdown("---")
     else:
-        st.warning("Gagal menemukan kode yang cocok dalam rumpun tersebut.")
+        st.warning("Tidak ditemukan kode yang cocok dengan rumpun tersebut. Silakan coba uraian lain.")
