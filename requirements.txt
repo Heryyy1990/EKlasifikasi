@@ -1,22 +1,5 @@
-# ============================================================
-# requirements.txt — SIKAP Dependencies
-# Dioptimasi untuk Streamlit Community Cloud Free Tier (800MB RAM)
-# ============================================================
-
-# ── Streamlit ──────────────────────────────────────────────
-streamlit>=1.35.0
-
-# ── Google Gemini API (SDK baru) ───────────────────────────
-google-genai>=1.0.0
-
-# ── Embedding — RINGAN (118MB, gantikan BGE-M3 yang 1.1GB) ─
-sentence-transformers>=3.0.0
-
-# ── FAISS CPU ──────────────────────────────────────────────
-faiss-cpu>=1.7.4
-
-# ── Numerik ────────────────────────────────────────────────
-numpy>=1.24.0
-
-# ── Pandas (untuk baca metadata jika format DataFrame) ─────
-pandas>=2.0.0
+streamlit==1.32.0
+pandas==2.2.1
+sentence-transformers==2.5.1
+faiss-cpu==1.8.0
+google-genai==0.3.0
