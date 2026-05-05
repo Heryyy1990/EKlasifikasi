@@ -1,8 +1,7 @@
-cat > /home/claude/sikap-app/utils.py << 'ENDOFFILE'
 # ============================================================
 # utils.py — Core logic SIKAP
 # Model: paraphrase-multilingual-MiniLM-L12-v2 (118MB)
-# Pipeline: embed query_expansion → FAISS search → score → rank
+# Ringan untuk Streamlit Cloud free tier (800MB RAM limit)
 # ============================================================
 
 import os
@@ -11,7 +10,15 @@ import numpy as np
 import faiss
 import streamlit as st
 
+# ─────────────────────────────────────────────
+# MODEL CONFIG
+# ─────────────────────────────────────────────
+
 MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
+# Kenapa model ini (bukan BGE-M3)?
+#   BGE-M3      : ~1.1 GB RAM → OOM di Streamlit Cloud free tier
+#   MiniLM-L12  : ~118 MB RAM → aman, support 50+ bahasa + Indonesia ✓
+# PENTING: FAISS index HARUS direbuild dulu dengan rebuild_index.py!
 
 
 # ─────────────────────────────────────────────
@@ -20,13 +27,18 @@ MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 
 @st.cache_resource(show_spinner="⏳ Memuat model embedding...")
 def load_embedding_model():
+    """
+    Load sentence-transformers model yang ringan.
+    Di-cache Streamlit → load sekali, reuse terus.
+    """
+    # Set HF_TOKEN jika ada di secrets (percepat download HuggingFace)
     try:
         hf_token = st.secrets.get("HF_TOKEN", None)
         if hf_token:
             os.environ["HF_TOKEN"]              = hf_token
             os.environ["HUGGINGFACE_HUB_TOKEN"] = hf_token
     except Exception:
-        pass
+        pass  # HF_TOKEN opsional
 
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(MODEL_NAME, device="cpu")
@@ -39,12 +51,16 @@ def load_embedding_model():
 
 @st.cache_resource(show_spinner="⏳ Memuat FAISS index...")
 def load_faiss_index(index_path: str = "sikap_bge.index"):
+    """
+    Load FAISS index dari file .index.
+    """
     if not os.path.exists(index_path):
         raise FileNotFoundError(
             f"File '{index_path}' tidak ditemukan. "
-            "Pastikan sudah di-push ke GitHub."
+            "Pastikan file ada di root folder project dan sudah di-push ke GitHub."
         )
-    return faiss.read_index(index_path)
+    index = faiss.read_index(index_path)
+    return index
 
 
 # ─────────────────────────────────────────────
@@ -53,46 +69,60 @@ def load_faiss_index(index_path: str = "sikap_bge.index"):
 
 @st.cache_resource(show_spinner="⏳ Memuat metadata klasifikasi...")
 def load_metadata(meta_path: str = "metadata.pkl"):
+    """
+    Load metadata.pkl — mapping index FAISS ke data klasifikasi.
+    """
     if not os.path.exists(meta_path):
         raise FileNotFoundError(
             f"File '{meta_path}' tidak ditemukan. "
-            "Pastikan sudah di-push ke GitHub."
+            "Pastikan file ada di root folder project dan sudah di-push ke GitHub."
         )
     with open(meta_path, "rb") as f:
         metadata = pickle.load(f)
 
+    # Normalkan ke list of dict
     if hasattr(metadata, "to_dict"):
         metadata = metadata.to_dict(orient="records")
     elif isinstance(metadata, dict):
         keys = list(metadata.keys())
-        n    = len(metadata[keys[0]])
+        n = len(metadata[keys[0]])
         metadata = [{k: metadata[k][i] for k in keys} for i in range(n)]
 
     return metadata
 
 
 # ─────────────────────────────────────────────
-# 4. EMBED TEKS
+# 4. EMBED QUERY
 # ─────────────────────────────────────────────
 
-def embed_text(model, text: str) -> np.ndarray:
+def embed_query(model, text: str) -> np.ndarray:
     """
-    Embed satu teks → numpy array (1, dim) float32, normalized.
+    Ubah teks query menjadi vector embedding.
+    normalize_embeddings=True agar cocok dengan inner product similarity.
+    Return: numpy array shape (1, dim), dtype float32
     """
     vec = model.encode(
         [text],
         normalize_embeddings=True,
         convert_to_numpy=True,
-        show_progress_bar=False,
     ).astype(np.float32)
-    return vec
+    return vec  # shape: (1, dim)
 
 
 # ─────────────────────────────────────────────
-# 5. SEARCH FAISS
+# 5. SEARCH FAISS CANDIDATES
 # ─────────────────────────────────────────────
 
-def search_candidates(index, query_vec: np.ndarray, metadata: list, top_k: int = 40) -> list:
+def search_candidates(
+    index,
+    query_vec: np.ndarray,
+    metadata: list,
+    top_k: int = 30,
+) -> list:
+    """
+    Cari top_k kandidat paling mirip dari FAISS index.
+    Return: list of dict kandidat + similarity_score
+    """
     scores, indices = index.search(query_vec, top_k)
     scores  = scores[0]
     indices = indices[0]
@@ -101,10 +131,16 @@ def search_candidates(index, query_vec: np.ndarray, metadata: list, top_k: int =
     for rank, (idx, raw_score) in enumerate(zip(indices, scores)):
         if idx < 0 or idx >= len(metadata):
             continue
+
         row = dict(metadata[idx])
-        sim = float(np.clip(raw_score, 0.0, 1.0)) \
-              if index.metric_type == faiss.METRIC_INNER_PRODUCT \
-              else float(1.0 / (1.0 + max(raw_score, 0.0)))
+
+        # Inner product dengan normalized vectors = cosine similarity (0–1)
+        # L2 distance: konversi ke similarity
+        if index.metric_type == faiss.METRIC_INNER_PRODUCT:
+            sim = float(np.clip(raw_score, 0.0, 1.0))
+        else:
+            sim = float(1.0 / (1.0 + max(raw_score, 0.0)))
+
         row["_similarity"] = sim
         row["_rank"]       = rank
         candidates.append(row)
@@ -113,60 +149,33 @@ def search_candidates(index, query_vec: np.ndarray, metadata: list, top_k: int =
 
 
 # ─────────────────────────────────────────────
-# 6. KEYWORD OVERLAP BONUS
+# 6. PARSE LEVEL KODE
 # ─────────────────────────────────────────────
 
-def keyword_overlap_score(query: str, doc: dict) -> float:
+def get_kode_level(kode: str) -> int:
     """
-    Hitung overlap kata antara query dan teks dokumen (uraian + domain + activity).
-    Memberikan bonus untuk kecocokan kata kunci spesifik.
-    Return: 0.0 – 1.0
+    Hitung level hierarki kode.
+    "500"       → 1 (primer)
+    "500.2"     → 2 (sekunder)
+    "500.2.1"   → 3 (tersier)
+    "500.2.1.4" → 4 (kuartier)
     """
-    import re
-    stop_words = {
-        "dan", "atau", "yang", "untuk", "dari", "ke", "di", "pada", "dengan",
-        "adalah", "ini", "itu", "oleh", "dalam", "juga", "tidak", "sebagai",
-        "akan", "telah", "sudah", "dapat", "serta", "hal", "sesuai"
-    }
-
-    def tokenize(text: str) -> set:
-        tokens = re.findall(r'\b[a-z]{3,}\b', text.lower())
-        return {t for t in tokens if t not in stop_words}
-
-    query_tokens = tokenize(query)
-    if not query_tokens:
-        return 0.0
-
-    doc_text = " ".join(filter(None, [
-        str(doc.get("uraian",      "")),
-        str(doc.get("penjelasan",  "")),
-        str(doc.get("konteks",     "")),
-        str(doc.get("domain",      "")),
-        str(doc.get("activity",    "")),
-    ]))
-    doc_tokens = tokenize(doc_text)
-
-    if not doc_tokens:
-        return 0.0
-
-    overlap = len(query_tokens & doc_tokens)
-    # Normalize terhadap ukuran query (recall-oriented)
-    return min(overlap / len(query_tokens), 1.0)
+    if not kode or not isinstance(kode, str):
+        return 0
+    return len(str(kode).strip().split("."))
 
 
 # ─────────────────────────────────────────────
 # 7. SCORING SYSTEM
 # ─────────────────────────────────────────────
 
-def score_candidates(candidates: list, query: str) -> list:
+def score_candidates(candidates: list) -> list:
     """
-    FINAL_SCORE = (embedding_similarity  × 0.55)
-                + (keyword_overlap       × 0.25)
-                + (domain_match          × 0.12)
-                + (activity_match        × 0.08)
+    FINAL_SCORE = (embedding_similarity × 0.70)
+                + (domain_match         × 0.20)
+                + (activity_match       × 0.10)
 
-    keyword_overlap: bonus kecocokan kata kunci eksplisit antara query dan dokumen.
-    domain/activity_match: konsensus dari top-5 kandidat.
+    domain_match & activity_match ditentukan dari mayoritas top-5.
     """
     if not candidates:
         return []
@@ -189,19 +198,12 @@ def score_candidates(candidates: list, query: str) -> list:
         dom = str(c.get("domain",   "")).strip().lower()
         act = str(c.get("activity", "")).strip().lower()
 
-        kw_score       = keyword_overlap_score(query, c)
         domain_match   = 1.0 if (dom and dom == dom_dominant) else 0.0
         activity_match = 1.0 if (act and act == act_dominant) else 0.0
 
-        final_score = (
-            sim            * 0.55 +
-            kw_score       * 0.25 +
-            domain_match   * 0.12 +
-            activity_match * 0.08
-        )
+        final_score = (sim * 0.70) + (domain_match * 0.20) + (activity_match * 0.10)
 
         row = dict(c)
-        row["_kw_score"]       = round(kw_score,   4)
         row["_domain_match"]   = domain_match
         row["_activity_match"] = activity_match
         row["_final_score"]    = round(final_score, 4)
@@ -212,23 +214,19 @@ def score_candidates(candidates: list, query: str) -> list:
 
 
 # ─────────────────────────────────────────────
-# 8. PARSE LEVEL KODE
+# 8. HIERARCHICAL FILTERING & RANKING
 # ─────────────────────────────────────────────
 
-def get_kode_level(kode: str) -> int:
-    if not kode or not isinstance(kode, str):
-        return 0
-    return len(str(kode).strip().split("."))
-
-
-# ─────────────────────────────────────────────
-# 9. HIERARCHICAL FILTERING
-# ─────────────────────────────────────────────
-
-SIMILARITY_THRESHOLD_QUARTIER = 0.35
-SIMILARITY_THRESHOLD_TERTIER  = 0.20
+SIMILARITY_THRESHOLD_QUARTIER = 0.40
+SIMILARITY_THRESHOLD_TERTIER  = 0.25
 
 def get_recommendations(scored_candidates: list, top_n: int = 3) -> list:
+    """
+    Pilih rekomendasi:
+    1. Prioritas kuartier (level 4) dengan similarity ≥ threshold
+    2. Fallback tersier (level 3) jika kuartier kurang
+    3. Best-effort jika masih kurang
+    """
     quartier  = []
     tertier   = []
     seen_kode = set()
@@ -256,7 +254,7 @@ def get_recommendations(scored_candidates: list, top_n: int = 3) -> list:
         extra = [t for t in tertier if t["kode"] not in existing_parents]
         result.extend(extra[:needed])
 
-    # Best-effort fallback
+    # Fallback best-effort
     if len(result) < top_n:
         used = {r["kode"] for r in result}
         fallback = [
@@ -269,18 +267,21 @@ def get_recommendations(scored_candidates: list, top_n: int = 3) -> list:
 
 
 # ─────────────────────────────────────────────
-# 10. PIPELINE UTAMA
+# 9. PIPELINE UTAMA
 # ─────────────────────────────────────────────
 
-def classify(inti_surat: str, model, index, metadata: list, top_n: int = 3) -> list:
+def classify(
+    inti_surat: str,
+    model,
+    index,
+    metadata: list,
+    top_n: int = 3,
+) -> list:
     """
-    Full pipeline: embed query_expansion → search → score (dengan keyword overlap) → rank
-    Parameter inti_surat di sini sebenarnya berisi search_query (hasil query expansion Gemini).
+    Full pipeline: embed → search → score → recommend
     """
-    query_vec       = embed_text(model, inti_surat)
-    candidates      = search_candidates(index, query_vec, metadata, top_k=50)
-    scored          = score_candidates(candidates, query=inti_surat)
+    query_vec       = embed_query(model, inti_surat)
+    candidates      = search_candidates(index, query_vec, metadata, top_k=40)
+    scored          = score_candidates(candidates)
     recommendations = get_recommendations(scored, top_n=top_n)
     return recommendations
-ENDOFFILE
-echo "utils.py written"
